@@ -50,6 +50,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "[4/4] Building Windows installer via electron-builder..." -ForegroundColor Cyan
+$DistDir = Join-Path $RootDir "desktop\dist"
+if (Test-Path $DistDir) {
+    Get-ChildItem -Path $DistDir -Filter "Jarvis-Setup-*.exe*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+}
 Push-Location (Join-Path $RootDir "desktop")
 try {
     & npm.cmd install

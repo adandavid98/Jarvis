@@ -50,7 +50,7 @@
           ]
         }
       ],
-      "artifactName": "Jarvis-Setup-${version}.${ext}"
+      "artifactName": "Jarvis-Setup.${ext}"
     },
     "nsis": {
       "oneClick": false,
