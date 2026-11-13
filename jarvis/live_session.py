@@ -183,6 +183,7 @@ class JarvisLiveSession:
         live_config = self.build_live_config(text_only=False)
         last_activity = time.monotonic()
         interaction_status = "IDLE"
+        turn_idle = True
         active_tasks: set[asyncio.Task[None]] = set()
         end_reason = "closed"
 
@@ -211,8 +212,6 @@ class JarvisLiveSession:
                         was_muted = False
                         audio_in.drain()
                         continue
-                    if float(np.abs(frame).mean()) > 350.0:
-                        last_activity = time.monotonic()
                     await session.send_realtime_input(
                         audio=types.Blob(
                             data=frame.tobytes(),
@@ -234,7 +233,7 @@ class JarvisLiveSession:
                     await session.send_realtime_input(text=text)
 
             async def _receive_loop() -> None:
-                nonlocal last_activity, interaction_status, end_reason
+                nonlocal last_activity, interaction_status, turn_idle, end_reason
                 active_speaker: str | None = None
                 turn_buffers: dict[str, list[str]] = {"You": [], "Jarvis": []}
 
@@ -279,6 +278,8 @@ class JarvisLiveSession:
                         status = _extract_interaction_status(message)
                         if status is not None and status != "INTERACTION_STATUS_UNSPECIFIED":
                             interaction_status = status
+                            if status == "IDLE":
+                                turn_idle = True
 
                         resumption_update = getattr(message, "session_resumption_update", None)
                         if resumption_update and getattr(resumption_update, "new_handle", None):
@@ -295,22 +296,29 @@ class JarvisLiveSession:
                                 audio_out.clear()
 
                             if content.model_turn and content.model_turn.parts:
+                                turn_idle = False
                                 for part in content.model_turn.parts:
                                     if part.inline_data and part.inline_data.data:
                                         audio_out.enqueue(part.inline_data.data)
                                         await self._emit({"type": "state", "state": "speaking"})
 
                             if content.input_transcription and content.input_transcription.text:
+                                last_activity = time.monotonic()
                                 await _print_tx("You", content.input_transcription.text)
 
                             if content.output_transcription and content.output_transcription.text:
+                                last_activity = time.monotonic()
                                 await _print_tx("Jarvis", content.output_transcription.text)
 
                             if content.turn_complete:
+                                turn_idle = True
+                                last_activity = time.monotonic()
                                 await _flush_speaker(active_speaker)
                                 await self._emit({"type": "state", "state": "listening"})
 
                         if message.tool_call and message.tool_call.function_calls:
+                            turn_idle = False
+                            last_activity = time.monotonic()
                             await _flush_speaker(active_speaker)
                             await self._emit({"type": "state", "state": "tool_running"})
                             for call in message.tool_call.function_calls:
@@ -329,7 +337,7 @@ class JarvisLiveSession:
                 while True:
                     await asyncio.sleep(1.0)
                     if (
-                        interaction_status == "IDLE"
+                        (interaction_status == "IDLE" or turn_idle)
                         and not audio_out.is_playing
                         and not active_tasks
                         and (time.monotonic() - last_activity) >= idle_timeout_sec
@@ -377,6 +385,8 @@ class JarvisLiveSession:
                 raise
             finally:
                 self._standby_event = None
+                if end_reason in {"cancelled", "standby"}:
+                    self._resumption_handle = None
                 for t in list(active_tasks):
                     t.cancel()
                 audio_out.clear()

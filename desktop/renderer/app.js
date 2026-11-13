@@ -8,6 +8,7 @@ const tabTasks = document.getElementById('tab-tasks');
 const tabRaw = document.getElementById('tab-raw');
 const btnNewChat = document.getElementById('btn-new-chat');
 const btnOpenBrowser = document.getElementById('btn-open-browser');
+const hudLayout = document.querySelector('.hud-layout');
 const centerWorkspace = document.getElementById('center-workspace');
 const viewerPane = document.getElementById('viewer-pane');
 const viewerResizer = document.getElementById('viewer-resizer');
@@ -83,6 +84,7 @@ function syncViewerBounds() {
 }
 
 function openViewer(url) {
+  hudLayout?.classList.add('viewer-active');
   viewerPane.classList.remove('hidden');
   viewerResizer.classList.remove('hidden');
   viewerOpenState = true;
@@ -94,6 +96,7 @@ function openViewer(url) {
 function closeViewer() {
   viewerOpenState = false;
   viewerExpanded = false;
+  hudLayout?.classList.remove('viewer-active');
   centerWorkspace.classList.remove('viewer-expanded');
   viewerExpandBtn.textContent = '⤢';
   viewerPane.classList.add('hidden');
@@ -254,8 +257,6 @@ document.getElementById('btn-wakeword').onclick = () =>
   sendCmd({ action: 'start_voice', mode: 'wakeword' });
 document.getElementById('btn-direct').onclick = () =>
   sendCmd({ action: 'start_voice', mode: 'direct' });
-document.getElementById('btn-standby').onclick = () =>
-  sendCmd({ action: 'standby' });
 document.getElementById('btn-stop').onclick = () =>
   sendCmd({ action: 'stop_voice' });
 

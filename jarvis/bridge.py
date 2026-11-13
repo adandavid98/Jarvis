@@ -408,6 +408,7 @@ class JarvisBridge:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._voice_task
         self._voice_task = None
+        self.session_mgr._resumption_handle = None
         await self._set_state("stopped")
 
     async def _handle_command(self, raw: str) -> None:
