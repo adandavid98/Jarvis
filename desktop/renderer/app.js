@@ -30,6 +30,7 @@ const apiKeyInput = document.getElementById('api-key-input');
 document.getElementById('btn-min').onclick = () => window.jarvisDesktop.minimize();
 document.getElementById('btn-max').onclick = () => window.jarvisDesktop.maximize();
 document.getElementById('btn-close').onclick = () => window.jarvisDesktop.close();
+document.getElementById('btn-update').onclick = () => window.jarvisDesktop.checkUpdates();
 document.getElementById('btn-key').onclick = () => keyModal.classList.remove('hidden');
 document.getElementById('btn-key-cancel').onclick = () => keyModal.classList.add('hidden');
 

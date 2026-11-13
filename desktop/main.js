@@ -250,6 +250,7 @@ ipcMain.on('window:maximize', () => {
   else mainWindow.maximize();
 });
 ipcMain.on('window:close', () => mainWindow?.close());
+ipcMain.on('app:check-updates', () => checkForUpdates(true));
 
 ipcMain.on('overlay:expand', () => {
   overlayWindow?.hide();

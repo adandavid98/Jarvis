@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('jarvisDesktop', {
   hideOverlay: () => ipcRenderer.send('overlay:hide'),
   notifyWake: () => ipcRenderer.send('jarvis:wake'),
   notifyState: (state) => ipcRenderer.send('jarvis:state', state),
+  checkUpdates: () => ipcRenderer.send('app:check-updates'),
   viewerOpen: (url) => ipcRenderer.send('viewer:open', url),
   viewerClose: () => ipcRenderer.send('viewer:close'),
   viewerNavigate: (action) => ipcRenderer.send('viewer:navigate', action),
