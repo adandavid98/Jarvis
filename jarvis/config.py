@@ -29,7 +29,7 @@ class JarvisConfig:
     # Wake word & session lifecycle
     wake_word_model: str = "hey_jarvis"
     wake_threshold: float = 0.5
-    idle_timeout_sec: float = 45.0
+    idle_timeout_sec: float = 15.0
 
     # Storage & workspace
     data_dir: Path = field(default_factory=lambda: Path("data"))
@@ -80,7 +80,7 @@ class JarvisConfig:
             voice_name=os.getenv("JARVIS_VOICE_NAME", "Fenrir").strip(),
             wake_word_model=os.getenv("JARVIS_WAKE_WORD", "hey_jarvis").strip(),
             wake_threshold=float(os.getenv("JARVIS_WAKE_THRESHOLD", "0.5")),
-            idle_timeout_sec=float(os.getenv("JARVIS_IDLE_TIMEOUT_SEC", "45")),
+            idle_timeout_sec=float(os.getenv("JARVIS_IDLE_TIMEOUT_SEC", "15")),
             data_dir=data_dir,
             db_path=db_path,
             workspace_dir=workspace,

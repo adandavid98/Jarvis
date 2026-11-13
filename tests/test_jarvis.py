@@ -215,3 +215,52 @@ def test_live_config_builds_for_both_38_models(tmp_config: JarvisConfig) -> None
     )
     assert _extract_interaction_status(msg) == "IDLE"
 
+
+def test_task_runs_limit_and_clear_chat(tmp_config: JarvisConfig) -> None:
+    memory = JarvisMemory(tmp_config.db_path)
+    memory.remember_fact("editor", "VS Code")
+    memory.add_reminder("Keep this reminder")
+
+    for idx in range(12):
+        memory.upsert_task_run(
+            task_id=f"task-{idx}",
+            prompt=f"Prompt {idx}",
+            status="done",
+            summary=f"Summary {idx}",
+            actions=[{"name": "run_shell_command", "kind": "command", "title": f"Cmd {idx}", "status": "ok"}],
+        )
+        memory.log_message("user", f"Msg {idx}", source="desktop")
+
+    recent_tasks = memory.recent_task_runs(limit=10)
+    assert len(recent_tasks) == 10
+    assert recent_tasks[0]["task_id"] == "task-2"
+    assert recent_tasks[-1]["task_id"] == "task-11"
+
+    memory.clear_chat_history()
+    assert memory.recent_task_runs(limit=10) == []
+    assert memory.recent_messages(limit=10) == []
+    assert len(memory.recall_facts()) == 1
+    assert len(memory.list_reminders()) == 1
+
+
+def test_web_search_and_embedded_viewer_url(tmp_config: JarvisConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVIS_EMBEDDED_VIEWER", "1")
+    memory = JarvisMemory(tmp_config.db_path)
+    registry = build_default_registry(tmp_config, memory)
+
+    async def run() -> None:
+        search_res = await registry.execute("web_search", {"query": "electron webcontentsview"})
+        assert search_res["status"] == "ok"
+        assert "duckduckgo.com/?q=electron+webcontentsview" in search_res["viewer_url"]
+
+        open_res = await registry.execute("open_application_or_url", {"target": "https://github.com/adandavid98/Jarvis"})
+        assert open_res["status"] == "ok"
+        assert open_res["viewer_url"] == "https://github.com/adandavid98/Jarvis"
+
+        standby_res = await registry.execute("enter_standby", {})
+        assert standby_res["status"] == "ok"
+        assert standby_res["standby"] is True
+
+    asyncio.run(run())
+    assert JarvisConfig().idle_timeout_sec == 15.0
+

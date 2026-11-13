@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -102,6 +103,17 @@ class JarvisMemory:
                     args_json TEXT NOT NULL,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS task_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT UNIQUE NOT NULL,
+                    prompt TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    summary TEXT NOT NULL DEFAULT '',
+                    actions_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -271,6 +283,79 @@ class JarvisMemory:
                 "INSERT INTO audit_log (tool_name, args_json, status, created_at) VALUES (?, ?, ?, ?)",
                 (tool_name, args_json, status, _utc_now_iso()),
             )
+
+    # --- Task Runs (Antigravity-style Action Feed) ---
+
+    def upsert_task_run(
+        self,
+        task_id: str,
+        prompt: str,
+        status: str,
+        summary: str,
+        actions: list[dict],
+    ) -> dict:
+        """Insert or update a task execution card with its actions and summary."""
+        now = _utc_now_iso()
+        actions_json = json.dumps(actions, default=str)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO task_runs (task_id, prompt, status, summary, actions_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    prompt = excluded.prompt,
+                    status = excluded.status,
+                    summary = excluded.summary,
+                    actions_json = excluded.actions_json,
+                    updated_at = excluded.updated_at
+                """,
+                (task_id, prompt.strip(), status, summary.strip(), actions_json, now, now),
+            )
+            row = conn.execute(
+                "SELECT task_id, prompt, status, summary, actions_json, created_at, updated_at FROM task_runs WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return {
+            "task_id": row["task_id"],
+            "prompt": row["prompt"],
+            "status": row["status"],
+            "summary": row["summary"],
+            "actions": json.loads(row["actions_json"] or "[]"),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def recent_task_runs(self, limit: int = 10) -> list[dict]:
+        """Return the most recent task runs in chronological order."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT task_id, prompt, status, summary, actions_json, created_at, updated_at
+                FROM task_runs
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "task_id": row["task_id"],
+                "prompt": row["prompt"],
+                "status": row["status"],
+                "summary": row["summary"],
+                "actions": json.loads(row["actions_json"] or "[]"),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in reversed(rows)
+        ]
+
+    def clear_chat_history(self) -> None:
+        """Clear transient chat messages and task cards while preserving facts and reminders."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM conversations")
+            conn.execute("DELETE FROM task_runs")
+        self.export_sync_markdown()
 
     def build_context_summary(self) -> str:
         """Format remembered facts, open reminders, and recent turns for session prompt injection."""

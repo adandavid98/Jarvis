@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, screen, nativeImage, dialog } = require('electron');
+const { app, BrowserWindow, WebContentsView, Tray, Menu, globalShortcut, ipcMain, screen, nativeImage, dialog, shell } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const WebSocket = require('ws');
@@ -7,6 +7,8 @@ const { autoUpdater } = require('electron-updater');
 const BRIDGE_PORT = 8765;
 let mainWindow = null;
 let overlayWindow = null;
+let viewerView = null;
+let viewerAttached = false;
 let tray = null;
 let bridgeProc = null;
 let isQuitting = false;
@@ -261,6 +263,90 @@ ipcMain.on('jarvis:state', (_ev, state) => {
     showOverlay();
   } else if (state === 'idle_wake' || state === 'stopped') {
     scheduleHideOverlay(2200);
+  }
+});
+
+function normalizeViewerUrl(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return 'https://duckduckgo.com';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(trimmed)) return `https://${trimmed}`;
+  return `https://duckduckgo.com/?q=${encodeURIComponent(trimmed)}`;
+}
+
+function emitViewerNavState() {
+  if (!viewerView || !mainWindow || mainWindow.isDestroyed()) return;
+  const wc = viewerView.webContents;
+  mainWindow.webContents.send('viewer:navigated', {
+    url: wc.getURL(),
+    title: wc.getTitle(),
+    canGoBack: wc.navigationHistory.canGoBack(),
+    canGoForward: wc.navigationHistory.canGoForward(),
+  });
+}
+
+function ensureViewerView() {
+  if (viewerView) return viewerView;
+  viewerView = new WebContentsView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  viewerView.setBackgroundColor('#071216');
+  const wc = viewerView.webContents;
+  wc.on('did-navigate', emitViewerNavState);
+  wc.on('did-navigate-in-page', emitViewerNavState);
+  wc.on('page-title-updated', emitViewerNavState);
+  wc.setWindowOpenHandler(({ url }) => {
+    if (url && /^https?:\/\//i.test(url)) {
+      wc.loadURL(url);
+    }
+    return { action: 'deny' };
+  });
+  return viewerView;
+}
+
+ipcMain.on('viewer:open', (_ev, rawUrl) => {
+  if (!mainWindow) return;
+  const view = ensureViewerView();
+  if (!viewerAttached) {
+    mainWindow.contentView.addChildView(view);
+    viewerAttached = true;
+  }
+  view.webContents.loadURL(normalizeViewerUrl(rawUrl));
+});
+
+ipcMain.on('viewer:set-bounds', (_ev, bounds) => {
+  if (!viewerView || !viewerAttached || !bounds) return;
+  viewerView.setBounds({
+    x: Math.max(0, Math.round(bounds.x || 0)),
+    y: Math.max(0, Math.round(bounds.y || 0)),
+    width: Math.max(100, Math.round(bounds.width || 300)),
+    height: Math.max(100, Math.round(bounds.height || 300)),
+  });
+});
+
+ipcMain.on('viewer:close', () => {
+  if (viewerView && viewerAttached && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.contentView.removeChildView(viewerView);
+    viewerAttached = false;
+  }
+});
+
+ipcMain.on('viewer:navigate', (_ev, action) => {
+  if (!viewerView) return;
+  const wc = viewerView.webContents;
+  if (action === 'back' && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
+  else if (action === 'forward' && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
+  else if (action === 'reload') wc.reload();
+});
+
+ipcMain.on('viewer:open-external', (_ev, url) => {
+  const target = url || viewerView?.webContents?.getURL();
+  if (target && /^https?:\/\//i.test(target)) {
+    shell.openExternal(target);
   }
 });
 

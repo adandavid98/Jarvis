@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import subprocess
+import urllib.parse
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -89,8 +90,15 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             return {"status": "error", "error": "Target cannot be empty."}
 
         if cleaned.lower().startswith(("http://", "https://")):
-            webbrowser.open(cleaned)
-            return {"status": "ok", "opened": cleaned, "kind": "url"}
+            if os.environ.get("JARVIS_EMBEDDED_VIEWER") != "1":
+                webbrowser.open(cleaned)
+            return {
+                "status": "ok",
+                "opened": cleaned,
+                "kind": "url",
+                "viewer_url": cleaned,
+                "title": cleaned,
+            }
 
         alias_cmd = _WINDOWS_APP_ALIASES.get(cleaned.lower())
         if alias_cmd:
@@ -205,6 +213,24 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             "bytes_written": len(content.encode("utf-8")),
         }
 
+    def web_search(query: str) -> dict[str, Any]:
+        cleaned = query.strip()
+        if not cleaned:
+            return {"status": "error", "error": "Search query cannot be empty."}
+        search_url = f"https://duckduckgo.com/?q={urllib.parse.quote_plus(cleaned)}"
+        if os.environ.get("JARVIS_EMBEDDED_VIEWER") != "1":
+            webbrowser.open(search_url)
+        return {
+            "status": "ok",
+            "query": cleaned,
+            "kind": "web_search",
+            "viewer_url": search_url,
+            "title": f"Search: {cleaned}",
+        }
+
+    def enter_standby() -> dict[str, Any]:
+        return {"status": "ok", "standby": True, "message": "Returning to idle wake-word standby."}
+
     registry.register(
         ToolSpec(
             name="get_system_status",
@@ -228,6 +254,31 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
                 "required": ["target"],
             },
             handler=open_application_or_url,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="web_search",
+            description="Search the web for a query and display the live results inside Jarvis's integrated viewer.",
+            parameters={
+                "type": "OBJECT",
+                "properties": {
+                    "query": {
+                        "type": "STRING",
+                        "description": "Search query to look up on the web.",
+                    }
+                },
+                "required": ["query"],
+            },
+            handler=web_search,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="enter_standby",
+            description="Return Jarvis to idle wake-word standby (listening only for 'Hey Jarvis') when the user says goodbye, 'that is all', 'standby', or 'go to sleep'.",
+            parameters={"type": "OBJECT", "properties": {}},
+            handler=enter_standby,
         )
     )
     registry.register(

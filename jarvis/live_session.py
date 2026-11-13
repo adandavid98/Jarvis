@@ -63,6 +63,12 @@ class JarvisLiveSession:
             http_options={"api_version": "v1beta"},
         )
         self._resumption_handle: str | None = None
+        self._standby_event: asyncio.Event | None = None
+
+    def request_standby(self) -> None:
+        """Signal the active voice session to exit back to idle wake-word mode."""
+        if self._standby_event is not None:
+            self._standby_event.set()
 
     async def _emit(self, payload: dict[str, Any]) -> None:
         if self._on_event is None:
@@ -131,7 +137,26 @@ class JarvisLiveSession:
         result = await self.registry.execute(call.name, args)
         status = str(result.get("status", "ok"))
         print(f"[tool] <- {call.name}: {status}")
-        await self._emit({"type": "tool", "phase": "done", "name": call.name, "status": status})
+        await self._emit(
+            {
+                "type": "tool",
+                "phase": "done",
+                "name": call.name,
+                "status": status,
+                "args": args,
+                "result": result,
+            }
+        )
+        if result.get("viewer_url"):
+            await self._emit(
+                {
+                    "type": "open_viewer",
+                    "url": str(result["viewer_url"]),
+                    "title": str(result.get("title") or call.name),
+                }
+            )
+        if result.get("standby") and self._standby_event is not None:
+            self._standby_event.set()
         if call.name in {"remember_fact", "manage_reminders"}:
             await self._emit({"type": "memory_updated"})
         await session.send_tool_response(
@@ -163,6 +188,8 @@ class JarvisLiveSession:
 
         await self._emit({"type": "state", "state": "listening"})
 
+        standby_event = asyncio.Event()
+        self._standby_event = standby_event
         async with self._client.aio.live.connect(
             model=self.config.model,
             config=live_config,
@@ -310,12 +337,23 @@ class JarvisLiveSession:
                         end_reason = "idle_timeout"
                         return
 
+            async def _standby_watchdog() -> None:
+                nonlocal end_reason
+                await standby_event.wait()
+                # Let Jarvis finish a brief spoken farewell if audio is queued
+                for _ in range(16):
+                    if not audio_out.is_playing:
+                        break
+                    await asyncio.sleep(0.25)
+                end_reason = "standby"
+
             send_task = asyncio.create_task(_send_mic_loop())
             recv_task = asyncio.create_task(_receive_loop())
             idle_task = asyncio.create_task(_idle_watchdog())
+            standby_task = asyncio.create_task(_standby_watchdog())
             text_task = asyncio.create_task(_send_text_loop())
 
-            tasks = [send_task, recv_task, text_task]
+            tasks = [send_task, recv_task, standby_task, text_task]
             if idle_timeout_sec and idle_timeout_sec > 0:
                 tasks.append(idle_task)
             else:
@@ -338,6 +376,7 @@ class JarvisLiveSession:
                 end_reason = "cancelled"
                 raise
             finally:
+                self._standby_event = None
                 for t in list(active_tasks):
                     t.cancel()
                 audio_out.clear()
@@ -351,6 +390,8 @@ class JarvisLiveSession:
         idle_event = asyncio.Event()
         idle_event.set()
 
+        standby_event = asyncio.Event()
+        self._standby_event = standby_event
         async with self._client.aio.live.connect(
             model=self.config.model,
             config=live_config,

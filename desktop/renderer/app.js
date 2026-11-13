@@ -2,7 +2,19 @@ const connDot = document.getElementById('conn-dot');
 const modelBadge = document.getElementById('model-badge');
 const orb = document.getElementById('jarvis-orb');
 const stateLabel = document.getElementById('state-label');
+const taskFeed = document.getElementById('task-feed');
 const chatFeed = document.getElementById('chat-feed');
+const tabTasks = document.getElementById('tab-tasks');
+const tabRaw = document.getElementById('tab-raw');
+const btnNewChat = document.getElementById('btn-new-chat');
+const btnOpenBrowser = document.getElementById('btn-open-browser');
+const centerWorkspace = document.getElementById('center-workspace');
+const viewerPane = document.getElementById('viewer-pane');
+const viewerResizer = document.getElementById('viewer-resizer');
+const viewerExpandBtn = document.getElementById('viewer-expand');
+const viewerHost = document.getElementById('viewer-host');
+const viewerUrlForm = document.getElementById('viewer-url-form');
+const viewerUrlInput = document.getElementById('viewer-url-input');
 const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
 const factsList = document.getElementById('facts-list');
@@ -29,9 +41,208 @@ keyForm.addEventListener('submit', (e) => {
   keyModal.classList.add('hidden');
 });
 
+const MAX_RECENT_ITEMS = 10;
 let ws = null;
 let liveDraftEl = null;
 let liveDraftRole = null;
+let taskRuns = [];
+let viewerOpenState = false;
+let viewerExpanded = false;
+
+function setFeedMode(mode) {
+  const showTasks = mode === 'tasks';
+  tabTasks.classList.toggle('active', showTasks);
+  tabRaw.classList.toggle('active', !showTasks);
+  taskFeed.classList.toggle('hidden', !showTasks);
+  chatFeed.classList.toggle('hidden', showTasks);
+}
+
+tabTasks.onclick = () => setFeedMode('tasks');
+tabRaw.onclick = () => setFeedMode('raw');
+
+btnNewChat.onclick = () => {
+  sendCmd({ action: 'new_chat' });
+  taskRuns = [];
+  renderTaskFeed();
+  chatFeed.innerHTML = '';
+  liveDraftEl = null;
+  liveDraftRole = null;
+};
+
+function syncViewerBounds() {
+  if (!viewerOpenState || viewerPane.classList.contains('hidden')) return;
+  const rect = viewerHost.getBoundingClientRect();
+  if (rect.width > 10 && rect.height > 10) {
+    window.jarvisDesktop.viewerSetBounds({
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+    });
+  }
+}
+
+function openViewer(url) {
+  viewerPane.classList.remove('hidden');
+  viewerResizer.classList.remove('hidden');
+  viewerOpenState = true;
+  if (url) viewerUrlInput.value = url;
+  window.jarvisDesktop.viewerOpen(url || 'https://duckduckgo.com');
+  requestAnimationFrame(() => syncViewerBounds());
+}
+
+function closeViewer() {
+  viewerOpenState = false;
+  viewerExpanded = false;
+  centerWorkspace.classList.remove('viewer-expanded');
+  viewerExpandBtn.textContent = '⤢';
+  viewerPane.classList.add('hidden');
+  viewerResizer.classList.add('hidden');
+  viewerPane.style.flex = '';
+  viewerPane.style.width = '';
+  window.jarvisDesktop.viewerClose();
+}
+
+viewerExpandBtn.onclick = () => {
+  viewerExpanded = !viewerExpanded;
+  centerWorkspace.classList.toggle('viewer-expanded', viewerExpanded);
+  viewerExpandBtn.textContent = viewerExpanded ? '⤡' : '⤢';
+  requestAnimationFrame(() => syncViewerBounds());
+};
+
+let isResizingViewer = false;
+viewerResizer.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  isResizingViewer = true;
+  viewerResizer.classList.add('dragging');
+});
+
+window.addEventListener('mousemove', (e) => {
+  if (!isResizingViewer || viewerExpanded) return;
+  const wsRect = centerWorkspace.getBoundingClientRect();
+  const newWidth = Math.max(260, Math.min(wsRect.width - 220, wsRect.right - e.clientX));
+  viewerPane.style.flex = 'none';
+  viewerPane.style.width = `${newWidth}px`;
+  syncViewerBounds();
+});
+
+window.addEventListener('mouseup', () => {
+  if (!isResizingViewer) return;
+  isResizingViewer = false;
+  viewerResizer.classList.remove('dragging');
+  syncViewerBounds();
+});
+
+btnOpenBrowser.onclick = () => {
+  if (viewerOpenState) closeViewer();
+  else openViewer(viewerUrlInput.value.trim() || 'https://duckduckgo.com');
+};
+
+document.getElementById('viewer-back').onclick = () => window.jarvisDesktop.viewerNavigate('back');
+document.getElementById('viewer-fwd').onclick = () => window.jarvisDesktop.viewerNavigate('forward');
+document.getElementById('viewer-reload').onclick = () => window.jarvisDesktop.viewerNavigate('reload');
+document.getElementById('viewer-ext').onclick = () => window.jarvisDesktop.viewerOpenExternal(viewerUrlInput.value.trim());
+document.getElementById('viewer-close').onclick = closeViewer;
+
+viewerUrlForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const target = viewerUrlInput.value.trim();
+  if (!target) return;
+  openViewer(target);
+});
+
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => syncViewerBounds()).observe(viewerHost);
+}
+window.addEventListener('resize', syncViewerBounds);
+
+window.jarvisDesktop.onViewerNavigated((nav) => {
+  if (nav?.url) viewerUrlInput.value = nav.url;
+});
+
+function actionIcon(kind) {
+  switch (kind) {
+    case 'web_search': return '🔍';
+    case 'open_url': return '🌐';
+    case 'file_edit': return '📝';
+    case 'command': return '💻';
+    case 'memory': return '🧠';
+    default: return '⚡';
+  }
+}
+
+function renderTaskFeed() {
+  taskFeed.innerHTML = '';
+  const visible = taskRuns
+    .filter((t) => t.status === 'running' || (t.actions && t.actions.length > 0) || t.summary)
+    .slice(-MAX_RECENT_ITEMS);
+
+  if (visible.length === 0) {
+    taskFeed.innerHTML = '<div class="empty-hint">No tasks yet. Give Jarvis a command by voice or text.</div>';
+    return;
+  }
+
+  for (const task of visible) {
+    const card = document.createElement('div');
+    card.className = 'task-card';
+
+    const header = document.createElement('div');
+    header.className = 'task-card-header';
+    const promptEl = document.createElement('div');
+    promptEl.className = 'task-prompt';
+    promptEl.textContent = task.prompt;
+    const statusEl = document.createElement('span');
+    statusEl.className = `task-status ${task.status || 'running'}`;
+    statusEl.textContent = (task.status || 'running').toUpperCase();
+    header.append(promptEl, statusEl);
+    card.appendChild(header);
+
+    if (task.actions && task.actions.length > 0) {
+      const actionsEl = document.createElement('div');
+      actionsEl.className = 'task-actions-list';
+      for (const act of task.actions) {
+        const row = document.createElement('div');
+        row.className = 'task-action-row';
+        const label = document.createElement('span');
+        const stateMark = act.status === 'running' ? '⏳' : act.status === 'error' ? '✕' : '✓';
+        label.textContent = `${actionIcon(act.kind)} ${act.title} (${stateMark})`;
+        row.appendChild(label);
+
+        if (act.target && /^https?:\/\//i.test(act.target)) {
+          const openBtn = document.createElement('button');
+          openBtn.type = 'button';
+          openBtn.className = 'task-action-link';
+          openBtn.textContent = 'View';
+          openBtn.onclick = () => openViewer(act.target);
+          row.appendChild(openBtn);
+        }
+        actionsEl.appendChild(row);
+      }
+      card.appendChild(actionsEl);
+    }
+
+    if (task.summary) {
+      const summaryEl = document.createElement('div');
+      summaryEl.className = 'task-summary';
+      summaryEl.textContent = task.summary;
+      card.appendChild(summaryEl);
+    }
+
+    taskFeed.appendChild(card);
+  }
+  taskFeed.scrollTop = taskFeed.scrollHeight;
+}
+
+function upsertTask(task) {
+  if (!task || !task.task_id) return;
+  const idx = taskRuns.findIndex((t) => t.task_id === task.task_id);
+  if (idx >= 0) taskRuns[idx] = task;
+  else taskRuns.push(task);
+  if (taskRuns.length > MAX_RECENT_ITEMS) {
+    taskRuns = taskRuns.slice(-MAX_RECENT_ITEMS);
+  }
+  renderTaskFeed();
+}
 
 function sendCmd(payload) {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -43,6 +254,8 @@ document.getElementById('btn-wakeword').onclick = () =>
   sendCmd({ action: 'start_voice', mode: 'wakeword' });
 document.getElementById('btn-direct').onclick = () =>
   sendCmd({ action: 'start_voice', mode: 'direct' });
+document.getElementById('btn-standby').onclick = () =>
+  sendCmd({ action: 'standby' });
 document.getElementById('btn-stop').onclick = () =>
   sendCmd({ action: 'stop_voice' });
 
@@ -95,6 +308,9 @@ function appendMessage(role, text, isDraft = false) {
   bodyEl.textContent = text;
   div.append(roleEl, bodyEl);
   chatFeed.appendChild(div);
+  while (chatFeed.children.length > MAX_RECENT_ITEMS) {
+    chatFeed.firstChild.remove();
+  }
   chatFeed.scrollTop = chatFeed.scrollHeight;
 
   if (isDraft) {
@@ -135,9 +351,13 @@ function renderMemory(snapshot) {
     }
   }
 
-  // Initial chat hydration on first connect
+  // Initial chat & task hydration on first connect
+  if (snapshot.recent_tasks) {
+    taskRuns = snapshot.recent_tasks.slice(-MAX_RECENT_ITEMS);
+    renderTaskFeed();
+  }
   if (chatFeed.children.length === 0 && snapshot.recent_messages) {
-    for (const m of snapshot.recent_messages) {
+    for (const m of snapshot.recent_messages.slice(-MAX_RECENT_ITEMS)) {
       appendMessage(m.role === 'user' ? 'user' : 'jarvis', m.content, false);
     }
   }
@@ -207,6 +427,16 @@ function connectBridge() {
       appendMessage(data.role === 'user' ? 'user' : 'jarvis', data.text, !data.final);
     } else if (data.type === 'tool') {
       addToolLog(data);
+    } else if (data.type === 'task_event') {
+      upsertTask(data.task);
+    } else if (data.type === 'open_viewer') {
+      if (data.url) openViewer(data.url);
+    } else if (data.type === 'chat_cleared') {
+      taskRuns = [];
+      renderTaskFeed();
+      chatFeed.innerHTML = '';
+      liveDraftEl = null;
+      liveDraftRole = null;
     } else if (data.type === 'error') {
       appendMessage('jarvis', `[Error] ${data.message}`, false);
     }

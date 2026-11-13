@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
+import uuid
 from dataclasses import asdict
 from typing import Any
 
@@ -40,9 +42,11 @@ class JarvisBridge:
         self._state: str = "stopped"
         self._voice_task: asyncio.Task[None] | None = None
         self._outbound_text_queue: asyncio.Queue[str] | None = None
+        os.environ.setdefault("JARVIS_EMBEDDED_VIEWER", "1")
         self._wake_event: asyncio.Event | None = None
         self._detector: WakeWordDetector | None = None
         self._telemetry_paused: bool = False
+        self._active_task: dict[str, Any] | None = None
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
         if not self._clients:
@@ -61,22 +65,142 @@ class JarvisBridge:
         self._state = state
         await self._broadcast({"type": "state", "state": state})
 
+    @staticmethod
+    def _format_tool_action(
+        name: str,
+        args: dict[str, Any],
+        status: str = "running",
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        res = result or {}
+        kind = "app_action"
+        title = name
+        target = ""
+        if name == "web_search":
+            kind = "web_search"
+            q = args.get("query") or res.get("query") or ""
+            title = f"Searched web: {q}" if q else "Web search"
+            target = str(res.get("viewer_url") or "")
+        elif name == "open_application_or_url":
+            raw_target = str(args.get("target") or res.get("opened") or "")
+            if raw_target.lower().startswith(("http://", "https://")) or res.get("viewer_url"):
+                kind = "open_url"
+                title = f"Opened URL: {raw_target}"
+                target = str(res.get("viewer_url") or raw_target)
+            else:
+                title = f"Opened {raw_target}"
+                target = raw_target
+        elif name in {"write_file", "edit_file"}:
+            kind = "file_edit"
+            path = str(args.get("path") or res.get("path") or "")
+            title = f"Updated file: {path}"
+            target = path
+        elif name == "run_shell_command":
+            kind = "command"
+            cmd = str(args.get("command") or "")
+            title = f"Ran command: {cmd[:70]}"
+        elif name in {"remember_fact", "manage_reminders"}:
+            kind = "memory"
+            title = "Updated synced memory" if name == "remember_fact" else "Updated reminders"
+        return {
+            "name": name,
+            "kind": kind,
+            "title": title,
+            "target": target,
+            "status": status,
+        }
+
+    async def _start_task(self, prompt: str) -> None:
+        cleaned = prompt.strip()
+        if not cleaned:
+            return
+        task_id = uuid.uuid4().hex[:12]
+        task = self.memory.upsert_task_run(
+            task_id=task_id,
+            prompt=cleaned,
+            status="running",
+            summary="",
+            actions=[],
+        )
+        self._active_task = task
+        await self._broadcast({"type": "task_event", "event": "started", "task": task})
+
+    async def _record_tool_action(self, payload: dict[str, Any]) -> None:
+        if self._active_task is None:
+            await self._start_task("Voice / Background command")
+        assert self._active_task is not None
+        name = str(payload.get("name", "tool"))
+        args = payload.get("args") or {}
+        phase = str(payload.get("phase", "start"))
+        status = "running" if phase == "start" else str(payload.get("status", "ok"))
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else None
+        action_item = self._format_tool_action(name, args, status=status, result=result)
+
+        actions: list[dict[str, Any]] = list(self._active_task.get("actions") or [])
+        if phase == "done":
+            updated = False
+            for idx in range(len(actions) - 1, -1, -1):
+                if actions[idx].get("name") == name and actions[idx].get("status") == "running":
+                    actions[idx] = action_item
+                    updated = True
+                    break
+            if not updated:
+                actions.append(action_item)
+        else:
+            actions.append(action_item)
+
+        self._active_task = self.memory.upsert_task_run(
+            task_id=self._active_task["task_id"],
+            prompt=self._active_task["prompt"],
+            status="running",
+            summary=self._active_task.get("summary", ""),
+            actions=actions,
+        )
+        await self._broadcast({"type": "task_event", "event": "updated", "task": self._active_task})
+
+    async def _complete_task(self, summary: str) -> None:
+        if self._active_task is None:
+            return
+        actions = list(self._active_task.get("actions") or [])
+        has_error = any(a.get("status") == "error" for a in actions)
+        final_status = "error" if has_error else "done"
+        task = self.memory.upsert_task_run(
+            task_id=self._active_task["task_id"],
+            prompt=self._active_task["prompt"],
+            status=final_status,
+            summary=summary.strip(),
+            actions=actions,
+        )
+        self._active_task = None
+        await self._broadcast({"type": "task_event", "event": "completed", "task": task})
+
     async def _on_session_event(self, payload: dict[str, Any]) -> None:
         if payload.get("type") == "state":
             self._state = str(payload.get("state", self._state))
         await self._broadcast(payload)
-        if payload.get("type") == "memory_updated" or (
-            payload.get("type") == "transcript" and payload.get("final")
-        ):
+
+        ev_type = payload.get("type")
+        if ev_type == "transcript" and payload.get("final"):
+            role = str(payload.get("role", "")).lower()
+            text = str(payload.get("text", "")).strip()
+            if role in {"you", "user"} and text:
+                await self._start_task(text)
+            elif role == "jarvis" and text:
+                await self._complete_task(text)
+            await self._broadcast(self.build_memory_snapshot())
+        elif ev_type == "tool":
+            await self._record_tool_action(payload)
+        elif ev_type == "memory_updated":
             await self._broadcast(self.build_memory_snapshot())
 
     def build_memory_snapshot(self) -> dict[str, Any]:
-        """Build a JSON-serializable snapshot of facts, reminders, and recent messages."""
+        """Build a JSON-serializable snapshot of facts, reminders, recent messages, and tasks."""
         return {
             "type": "memory_snapshot",
             "facts": [asdict(f) for f in self.memory.recall_facts(limit=30)],
             "reminders": [asdict(r) for r in self.memory.list_reminders(include_completed=False)],
-            "recent_messages": [asdict(m) for m in self.memory.recent_messages(limit=30)],
+            "recent_messages": [asdict(m) for m in self.memory.recent_messages(limit=10)],
+            "recent_tasks": self.memory.recent_task_runs(limit=10),
         }
 
     def build_telemetry(self) -> dict[str, Any]:
@@ -272,6 +396,9 @@ class JarvisBridge:
                 await self._broadcast(
                     {"type": "transcript", "role": "jarvis", "text": full, "final": True}
                 )
+                await self._complete_task(full)
+            elif self._active_task is not None:
+                await self._complete_task("Completed.")
             await self._broadcast(self.build_memory_snapshot())
             await self._set_state("stopped")
 
@@ -332,6 +459,15 @@ class JarvisBridge:
                 asyncio.create_task(_deferred_wake())
         elif action == "stop_voice":
             await self._stop_voice()
+        elif action == "standby":
+            if self._voice_task and not self._voice_task.done():
+                self.session_mgr.request_standby()
+            else:
+                if not self.config.gemini_api_key:
+                    await self._broadcast({"type": "needs_api_key", "missing": True})
+                    return
+                await self._stop_voice()
+                self._voice_task = asyncio.create_task(self._run_voice_loop("wakeword"))
         elif action == "send_text":
             if not self.config.gemini_api_key:
                 await self._broadcast({"type": "needs_api_key", "missing": True})
@@ -339,10 +475,21 @@ class JarvisBridge:
             text = str(data.get("text", "")).strip()
             if not text:
                 return
+            await self._start_task(text)
             if self._outbound_text_queue is not None and self._voice_task and not self._voice_task.done():
                 await self._outbound_text_queue.put(text)
             else:
                 asyncio.create_task(self._send_single_text_turn(text))
+        elif action == "new_chat":
+            self.memory.clear_chat_history()
+            self._active_task = None
+            self.session_mgr._resumption_handle = None
+            await self._broadcast({"type": "chat_cleared"})
+            await self._broadcast(self.build_memory_snapshot())
+        elif action == "open_url":
+            url = str(data.get("url", "")).strip()
+            if url:
+                await self._broadcast({"type": "open_viewer", "url": url, "title": url})
         elif action == "add_reminder":
             title = str(data.get("title", "")).strip()
             due_at = str(data.get("due_at", "")).strip() or None

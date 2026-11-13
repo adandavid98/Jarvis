@@ -68,10 +68,45 @@
         <div class="voice-controls">
           <button class="ctrl-btn primary" id="btn-wakeword">WAKE WORD ("HEY JARVIS")</button>
           <button class="ctrl-btn" id="btn-direct">DIRECT VOICE</button>
+          <button class="ctrl-btn" id="btn-standby" title="Return to Idle Wake ('Hey Jarvis')">STANDBY</button>
           <button class="ctrl-btn danger" id="btn-stop">MUTE / STOP</button>
         </div>
 
-        <div class="chat-feed" id="chat-feed"></div>
+        <div class="feed-toolbar">
+          <div class="feed-tabs">
+            <button class="tab-btn active" id="tab-tasks" type="button">Tasks &amp; Changes</button>
+            <button class="tab-btn" id="tab-raw" type="button">Raw Chat</button>
+            <span class="feed-limit-pill">Last 10</span>
+          </div>
+          <div class="feed-actions">
+            <button class="tab-btn" id="btn-open-browser" type="button" title="Open Integrated Browser">🌐 Browser</button>
+            <button class="tab-btn" id="btn-new-chat" type="button" title="Start a fresh chat & clear feed">+ New Chat</button>
+          </div>
+        </div>
+
+        <div class="center-workspace" id="center-workspace">
+          <div class="feed-column">
+            <div class="task-feed" id="task-feed"></div>
+            <div class="chat-feed hidden" id="chat-feed"></div>
+          </div>
+
+          <div class="viewer-resizer hidden" id="viewer-resizer" title="Drag to resize"></div>
+
+          <div class="viewer-pane hidden" id="viewer-pane">
+            <div class="viewer-toolbar">
+              <button class="viewer-btn" id="viewer-back" type="button" title="Back">←</button>
+              <button class="viewer-btn" id="viewer-fwd" type="button" title="Forward">→</button>
+              <button class="viewer-btn" id="viewer-reload" type="button" title="Reload">↻</button>
+              <form class="viewer-url-form" id="viewer-url-form">
+                <input type="text" id="viewer-url-input" placeholder="Search or enter URL..." autocomplete="off" />
+              </form>
+              <button class="viewer-btn" id="viewer-expand" type="button" title="Expand / Restore Viewer">⤢</button>
+              <button class="viewer-btn" id="viewer-ext" type="button" title="Open in External Browser">↗</button>
+              <button class="viewer-btn danger" id="viewer-close" type="button" title="Close Viewer">✕</button>
+            </div>
+            <div class="viewer-host" id="viewer-host"></div>
+          </div>
+        </div>
 
         <form class="chat-form" id="chat-form">
           <input
