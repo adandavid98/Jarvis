@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jarvis Live Preview</title>
+  <link rel="stylesheet" href="overlay.css" />
+</head>
+<body>
+  <div class="pill">
+    <div class="orb-wrap">
+      <div class="orb" id="ov-orb"></div>
+    </div>
+
+    <div class="content">
+      <div class="top-row">
+        <span class="state-tag" id="ov-state">LISTENING</span>
+        <span class="tool-tag hidden" id="ov-tool"></span>
+      </div>
+      <div class="transcript" id="ov-text">Listening...</div>
+    </div>
+
+    <div class="actions">
+      <button id="ov-expand" title="Open Full HUD">HUD</button>
+      <button id="ov-close" title="Dismiss">✕</button>
+    </div>
+  </div>
+  <script src="overlay.js"></script>
+</body>
+</html>

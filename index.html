@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JARVIS System UI</title>
+    <style>
+        :root {
+            --glow-color: #00ffcc;
+            --bg-color: #04090b;
+            --panel-bg: rgba(10, 25, 30, 0.6);
+            --text-color: #00ffcc;
+            --danger-color: #ff0055;
+            --input-bg: rgba(0, 50, 60, 0.4);
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            text-transform: uppercase;
+        }
+
+        .hud-grid {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                linear-gradient(rgba(0, 255, 204, 0.05) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 255, 204, 0.05) 1px, transparent 1px);
+            background-size: 40px 40px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .main-panel {
+            position: relative;
+            width: 80vw;
+            height: 80vh;
+            background: var(--panel-bg);
+            border: 1px solid var(--glow-color);
+            box-shadow: 0 0 20px rgba(0, 255, 204, 0.2), inset 0 0 20px rgba(0, 255, 204, 0.1);
+            border-radius: 10px;
+            padding: 20px;
+            z-index: 1;
+            display: grid;
+            grid-template-columns: 1fr 2fr 1fr;
+            grid-template-rows: auto 1fr auto;
+            gap: 20px;
+        }
+
+        .corner-bracket {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--glow-color);
+        }
+
+        .top-left { top: -5px; left: -5px; border-right: none; border-bottom: none; }
+        .top-right { top: -5px; right: -5px; border-left: none; border-bottom: none; }
+        .bottom-left { bottom: -5px; left: -5px; border-right: none; border-top: none; }
+        .bottom-right { bottom: -5px; right: -5px; border-left: none; border-top: none; }
+
+        header {
+            grid-column: 1 / -1;
+            text-align: center;
+            font-size: 24px;
+            letter-spacing: 5px;
+            border-bottom: 1px solid var(--glow-color);
+            padding-bottom: 10px;
+            box-shadow: 0 5px 5px rgba(0, 255, 204, 0.1);
+        }
+
+        .status-panel {
+            grid-column: 1;
+            border-right: 1px solid rgba(0, 255, 204, 0.3);
+            padding: 10px;
+        }
+
+        .central-display {
+            grid-column: 2;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }
+
+        .network-panel {
+            grid-column: 3;
+            border-left: 1px solid rgba(0, 255, 204, 0.3);
+            padding: 10px;
+        }
+
+        .chat-container {
+            grid-column: 1 / -1;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            border-top: 1px solid var(--glow-color);
+            padding-top: 15px;
+        }
+
+        #chat-output {
+            height: 100px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(0, 255, 204, 0.2);
+            padding: 10px;
+            overflow-y: auto;
+            font-size: 14px;
+            border-radius: 5px;
+            color: var(--text-color);
+        }
+
+        .input-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        #chat-input {
+            flex: 1;
+            background: var(--input-bg);
+            border: 1px solid var(--glow-color);
+            color: var(--text-color);
+            padding: 10px;
+            font-family: inherit;
+            border-radius: 5px;
+            outline: none;
+        }
+
+        #chat-input:focus {
+            box-shadow: 0 0 10px rgba(0, 255, 204, 0.5);
+        }
+
+        #send-btn, #mic-btn {
+            background: var(--glow-color);
+            color: var(--bg-color);
+            border: none;
+            padding: 10px 20px;
+            font-family: inherit;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 5px;
+            transition: all 0.2s;
+            text-transform: uppercase;
+        }
+
+        #send-btn:hover, #mic-btn:hover {
+            box-shadow: 0 0 10px var(--glow-color);
+            transform: translateY(-2px);
+        }
+
+        #mic-btn {
+            background: transparent;
+            border: 1px solid var(--glow-color);
+            color: var(--glow-color);
+        }
+
+        #mic-btn.active {
+            background: var(--danger-color);
+            border-color: var(--danger-color);
+            color: white;
+            box-shadow: 0 0 15px var(--danger-color);
+        }
+
+        .glitch-text {
+            animation: glitch 1s infinite alternate;
+        }
+
+        @keyframes glitch {
+            0% { opacity: 1; }
+            50% { opacity: 0.8; }
+            100% { opacity: 1; }
+        }
+
+        .circular-progress {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            border: 2px solid rgba(0, 255, 204, 0.2);
+            border-top-color: var(--glow-color);
+            animation: spin 2s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        footer {
+            grid-column: 1 / -1;
+            text-align: center;
+            font-size: 12px;
+            color: rgba(0, 255, 204, 0.5);
+            margin-top: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="hud-grid"></div>
+
+    <div class="main-panel">
+        <div class="corner-bracket top-left"></div>
+        <div class="corner-bracket top-right"></div>
+        <div class="corner-bracket bottom-left"></div>
+        <div class="corner-bracket bottom-right"></div>
+
+        <header>
+            <span class="glitch-text">JARVIS OS - ACTIVE</span>
+        </header>
+
+        <div class="status-panel">
+            <h3>System Status</h3>
+            <p>> CPU: Optimal</p>
+            <p>> TEMP: 45°C</p>
+            <p>> MEM: 16GB</p>
+        </div>
+
+        <div class="central-display">
+            <div class="circular-progress"></div>
+            <p style="margin-top: 20px;">Awaiting Command</p>
+        </div>
+
+        <div class="network-panel">
+            <h3>Network Uplink</h3>
+            <p>> NODE: SECURE</p>
+            <p>> LATENCY: 2ms</p>
+        </div>
+
+        <div class="chat-container">
+            <div id="chat-output">> SISTEMA INICIALIZADO. ESPERANDO COMANDO...</div>
+            <div class="input-group">
+                <button id="mic-btn" onclick="toggleVoice()">Activar Voz</button>
+                <input type="text" id="chat-input" placeholder="Escribe un comando aquí...">
+                <button id="send-btn" onclick="sendMessage()">Enviar</button>
+            </div>
+        </div>
+
+        <footer>
+            <p>System Ready</p>
+        </footer>
+    </div>
+
+    <script>
+        const chatInput = document.getElementById('chat-input');
+        const chatOutput = document.getElementById('chat-output');
+        const micBtn = document.getElementById('mic-btn');
+        let isListening = false;
+
+        function sendMessage() {
+            const text = chatInput.value.trim();
+            if (text !== '') {
+                chatOutput.innerHTML += `<br>> Usuario: ${text}`;
+                chatInput.value = '';
+                chatOutput.scrollTop = chatOutput.scrollTop = chatOutput.scrollHeight;
+                
+                setTimeout(() => {
+                    chatOutput.innerHTML += `<br>> Jarvis: Procesando "${text}"...`;
+                    chatOutput.scrollTop = chatOutput.scrollHeight;
+                }, 500);
+            }
+        }
+
+        function toggleVoice() {
+            isListening = !isListening;
+            if (isListening) {
+                micBtn.innerText = 'Escuchando...';
+                micBtn.classList.add('active');
+                chatOutput.innerHTML += `<br>> Sistema: Micrófono activado...`;
+            } else {
+                micBtn.innerText = 'Activar Voz';
+                micBtn.classList.remove('active');
+                chatOutput.innerHTML += `<br>> Sistema: Micrófono desactivado.`;
+            }
+            chatOutput.scrollTop = chatOutput.scrollHeight;
+        }
+
+        chatInput.addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>

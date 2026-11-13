@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Environment & Secrets
+.env
+.env.local
+
+# Local Data & Models
+*.db
+*.sqlite
+*.sqlite3
+data/
+models/
+logs/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Electron
+desktop/node_modules/
+desktop/dist/
+desktop/resources-build/
+*.spec
