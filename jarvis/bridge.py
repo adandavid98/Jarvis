@@ -238,19 +238,35 @@ class JarvisBridge:
         loop = asyncio.get_running_loop()
         mic_queue = audio_in.start(loop)
         audio_out.start()
-        self._outbound_text_queue = asyncio.Queue()
-        self._wake_event = asyncio.Event()
 
         try:
-            if use_wakeword:
-                if self._detector is None:
-                    await self._set_state("loading_wakeword")
-                    detector = WakeWordDetector(
-                        model_name=self.config.wake_word_model,
-                        threshold=self.config.wake_threshold,
-                    )
-                    await asyncio.to_thread(detector.load)
+            if use_wakeword and self._detector is None:
+                await self._set_state("loading_wakeword")
+                detector = WakeWordDetector(
+                    model_name=self.config.wake_word_model,
+                    threshold=self.config.wake_threshold,
+                )
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(detector.load), timeout=20.0)
                     self._detector = detector
+                except Exception as exc:
+                    reason = (
+                        "Wake word model timed out after 20s"
+                        if isinstance(exc, asyncio.TimeoutError)
+                        else f"Wake word failed to load ({type(exc).__name__}: {exc})"
+                    )
+                    await self._broadcast(
+                        {
+                            "type": "error",
+                            "message": f"{reason}. Falling back to direct voice & text mode.",
+                        }
+                    )
+                    use_wakeword = False
+
+            self._outbound_text_queue = asyncio.Queue()
+            self._wake_event = asyncio.Event()
+
+            if use_wakeword:
 
                 while True:
                     await self._set_state("idle_wake")
@@ -431,6 +447,7 @@ class JarvisBridge:
                 on_event=self._on_session_event,
             )
             await self._broadcast({"type": "needs_api_key", "missing": False})
+            await self._broadcast({"type": "api_key_saved", "saved": True})
             if data.get("start_voice", True):
                 await self._stop_voice()
                 self._voice_task = asyncio.create_task(self._run_voice_loop("wakeword"))

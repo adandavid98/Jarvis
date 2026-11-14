@@ -38,6 +38,10 @@ keyForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const key = apiKeyInput.value.trim();
   if (!key) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    appendMessage('jarvis', '[Error] Bridge is not connected yet. Wait a moment and try again.', false);
+    return;
+  }
   sendCmd({ action: 'save_api_key', api_key: key, start_voice: true });
   apiKeyInput.value = '';
   keyModal.classList.add('hidden');
@@ -412,7 +416,11 @@ function connectBridge() {
         setState('needs_key');
       } else {
         keyModal.classList.add('hidden');
+        if (stateLabel.textContent === 'NEEDS KEY') setState('stopped');
       }
+    } else if (data.type === 'api_key_saved') {
+      keyModal.classList.add('hidden');
+      if (stateLabel.textContent === 'NEEDS KEY') setState('stopped');
     } else if (data.type === 'telemetry') {
       document.getElementById('cpu-val').textContent = `${data.cpu_percent}%`;
       document.getElementById('cpu-bar').style.width = `${Math.min(100, data.cpu_percent)}%`;

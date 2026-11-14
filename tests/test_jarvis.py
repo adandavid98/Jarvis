@@ -264,3 +264,52 @@ def test_web_search_and_embedded_viewer_url(tmp_config: JarvisConfig, monkeypatc
     asyncio.run(run())
     assert JarvisConfig().idle_timeout_sec == 15.0
 
+
+def test_bridge_save_api_key_and_wakeword_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvis.bridge import JarvisBridge
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    cfg = JarvisConfig(
+        gemini_api_key="",
+        data_dir=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        workspace_dir=tmp_path,
+    )
+    bridge = JarvisBridge(config=cfg)
+    events: list[dict[str, object]] = []
+
+    async def fake_broadcast(payload: dict[str, object]) -> None:
+        events.append(payload)
+
+    bridge._broadcast = fake_broadcast  # type: ignore[method-assign]
+
+    async def run() -> None:
+        await bridge._handle_command(json.dumps({"action": "save_api_key", "api_key": "new-key-123", "start_voice": False}))
+        assert bridge.config.gemini_api_key == "new-key-123"
+        assert (tmp_path / ".env").read_text(encoding="utf-8").strip() == "GEMINI_API_KEY=new-key-123"
+        assert {"type": "needs_api_key", "missing": False} in events
+        assert {"type": "api_key_saved", "saved": True} in events
+
+        # Verify wakeword load failure falls back to direct mode instead of hanging
+        fake_in = MagicMock()
+        fake_in.start.return_value = asyncio.Queue()
+        fake_out = MagicMock()
+        bridge.session_mgr.run_voice_session = AsyncMock(return_value="closed")  # type: ignore[method-assign]
+
+        with (
+            patch("jarvis.bridge.AudioInputStream", return_value=fake_in),
+            patch("jarvis.bridge.AudioOutputStream", return_value=fake_out),
+            patch("jarvis.bridge.WakeWordDetector") as mock_det_cls,
+        ):
+            mock_det_cls.return_value.load.side_effect = RuntimeError("onnx failed")
+            await bridge._run_voice_loop("wakeword")
+
+        assert any(
+            ev.get("type") == "error" and "Falling back to direct voice" in str(ev.get("message", ""))
+            for ev in events
+        )
+        bridge.session_mgr.run_voice_session.assert_awaited_once()
+
+    asyncio.run(run())
+
+
