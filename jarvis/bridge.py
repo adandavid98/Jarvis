@@ -261,17 +261,26 @@ class JarvisBridge:
         use_wakeword = mode == "wakeword"
         refresh_audio_devices()
         self._default_endpoints = get_windows_default_endpoints(ensure_mic_unmuted=True)
+        loop = asyncio.get_running_loop()
+        audio_out = AudioOutputStream(
+            sample_rate=self.config.output_sample_rate,
+            channels=self.config.audio_channels,
+        )
+
+        def _handle_barge_in() -> None:
+            audio_out.clear()
+            if self._state == "speaking":
+                loop.call_soon_threadsafe(lambda: asyncio.create_task(self._set_state("listening")))
+
         audio_in = AudioInputStream(
             sample_rate=self.config.input_sample_rate,
             channels=self.config.audio_channels,
             blocksize=self.config.input_chunk_samples,
             device=None,
+            playback_ref=audio_out.playback_ref,
+            on_barge_in=_handle_barge_in,
+            barge_in_enabled=self.config.barge_in_enabled,
         )
-        audio_out = AudioOutputStream(
-            sample_rate=self.config.output_sample_rate,
-            channels=self.config.audio_channels,
-        )
-        loop = asyncio.get_running_loop()
         try:
             mic_queue = audio_in.start(loop)
             audio_out.start()
@@ -290,6 +299,7 @@ class JarvisBridge:
                 detector = WakeWordDetector(
                     model_name=self.config.wake_word_model,
                     threshold=self.config.wake_threshold,
+                    consecutive_frames=self.config.wake_consecutive_frames,
                 )
                 try:
                     await asyncio.wait_for(asyncio.to_thread(detector.load), timeout=20.0)
@@ -310,41 +320,66 @@ class JarvisBridge:
 
             self._outbound_text_queue = asyncio.Queue()
             self._wake_event = asyncio.Event()
+            consecutive_api_errors = 0
+
+            async def _drain_cooldown(cooldown_sec: float = 1.6) -> None:
+                deadline = loop.time() + cooldown_sec
+                while loop.time() < deadline:
+                    audio_in.drain()
+                    await asyncio.sleep(0.15)
+                    if not audio_out.is_playing and (deadline - loop.time()) < (cooldown_sec - 0.8):
+                        break
+                audio_in.drain()
+
+            async def _run_live_guarded(*, initial_prompt: str | None = None, wake_greeting: bool = False) -> None:
+                nonlocal consecutive_api_errors
+                try:
+                    await self.session_mgr.run_voice_session(
+                        audio_in=audio_in,
+                        audio_out=audio_out,
+                        mic_queue=mic_queue,
+                        idle_timeout_sec=self.config.idle_timeout_sec,
+                        initial_prompt=initial_prompt,
+                        outbound_text_queue=self._outbound_text_queue,
+                        wake_greeting=wake_greeting,
+                    )
+                    consecutive_api_errors = 0
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    consecutive_api_errors += 1
+                    self.session_mgr._resumption_handle = None
+                    raw = f"{type(exc).__name__}: {exc}"
+                    low = raw.lower()
+                    is_quota = "1011" in low or "exhausted" in low or "quota" in low or "429" in low
+                    friendly = (
+                        "Cuota o límite temporal de Gemini Live alcanzado (1011). Reintentando en modo espera..."
+                        if is_quota
+                        else raw
+                    )
+                    await self._broadcast({"type": "error", "message": friendly})
+                    await asyncio.sleep(min(12.0, 4.0 * consecutive_api_errors))
 
             if use_wakeword:
-
+                assert self._detector is not None
                 while True:
                     await self._set_state("idle_wake")
+                    await _drain_cooldown(1.2)
                     self._detector.reset()
                     self._wake_event.clear()
-                    audio_in.drain()
 
                     while True:
                         if self._wake_event.is_set():
                             self._wake_event.clear()
                             await self._broadcast({"type": "wake", "model": "manual", "score": 1.0})
                             audio_in.drain()
-                            await self.session_mgr.run_voice_session(
-                                audio_in=audio_in,
-                                audio_out=audio_out,
-                                mic_queue=mic_queue,
-                                idle_timeout_sec=self.config.idle_timeout_sec,
-                                outbound_text_queue=self._outbound_text_queue,
-                                wake_greeting=True,
-                            )
+                            await _run_live_guarded(wake_greeting=True)
                             break
 
                         # Allow typed text in the Desktop UI to wake Jarvis too
                         if not self._outbound_text_queue.empty():
                             initial = await self._outbound_text_queue.get()
-                            await self.session_mgr.run_voice_session(
-                                audio_in=audio_in,
-                                audio_out=audio_out,
-                                mic_queue=mic_queue,
-                                idle_timeout_sec=self.config.idle_timeout_sec,
-                                initial_prompt=initial,
-                                outbound_text_queue=self._outbound_text_queue,
-                            )
+                            await _run_live_guarded(initial_prompt=initial, wake_greeting=False)
                             break
 
                         try:
@@ -352,33 +387,55 @@ class JarvisBridge:
                         except asyncio.TimeoutError:
                             continue
 
-                        detected, score = self._detector.process_frame(frame)
+                        pop_fn = getattr(audio_in, "pop_wake_frame", None)
+                        wake_pair = pop_fn() if callable(pop_fn) else None
+                        if isinstance(wake_pair, tuple) and len(wake_pair) == 2:
+                            wake_frame, speech_active = wake_pair
+                        else:
+                            wake_frame, speech_active = frame, True
+
+                        detected, score = self._detector.process_frame(
+                            wake_frame,
+                            speech_active=bool(speech_active),
+                        )
                         if detected:
                             await self._broadcast(
                                 {"type": "wake", "model": self.config.wake_word_model, "score": score}
                             )
                             self._detector.reset()
                             audio_in.drain()
-                            await self.session_mgr.run_voice_session(
-                                audio_in=audio_in,
-                                audio_out=audio_out,
-                                mic_queue=mic_queue,
-                                idle_timeout_sec=self.config.idle_timeout_sec,
-                                outbound_text_queue=self._outbound_text_queue,
-                                wake_greeting=True,
-                            )
+                            await _run_live_guarded(wake_greeting=True)
                             break
             else:
                 while True:
-                    reason = await self.session_mgr.run_voice_session(
-                        audio_in=audio_in,
-                        audio_out=audio_out,
-                        mic_queue=mic_queue,
-                        idle_timeout_sec=None,
-                        outbound_text_queue=self._outbound_text_queue,
-                    )
-                    if reason != "go_away":
-                        break
+                    try:
+                        reason = await self.session_mgr.run_voice_session(
+                            audio_in=audio_in,
+                            audio_out=audio_out,
+                            mic_queue=mic_queue,
+                            idle_timeout_sec=None,
+                            outbound_text_queue=self._outbound_text_queue,
+                        )
+                        consecutive_api_errors = 0
+                        if reason != "go_away":
+                            break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        consecutive_api_errors += 1
+                        self.session_mgr._resumption_handle = None
+                        raw = f"{type(exc).__name__}: {exc}"
+                        low = raw.lower()
+                        is_quota = "1011" in low or "exhausted" in low or "quota" in low or "429" in low
+                        friendly = (
+                            "Cuota o límite temporal de Gemini Live alcanzado (1011). Reconectando..."
+                            if is_quota
+                            else raw
+                        )
+                        await self._broadcast({"type": "error", "message": friendly})
+                        if consecutive_api_errors >= 3:
+                            break
+                        await asyncio.sleep(min(12.0, 4.0 * consecutive_api_errors))
         except asyncio.CancelledError:
             raise
         except Exception as exc:

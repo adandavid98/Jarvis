@@ -28,8 +28,14 @@ class JarvisConfig:
 
     # Wake word & session lifecycle
     wake_word_model: str = "hey_jarvis"
-    wake_threshold: float = 0.18
+    wake_threshold: float = 0.28
+    wake_consecutive_frames: int = 2
     idle_timeout_sec: float = 15.0
+
+    # Full-duplex VAD & barge-in conversation controls
+    silence_duration_ms: int = 1100
+    prefix_padding_ms: int = 300
+    barge_in_enabled: bool = True
 
     # Storage & workspace
     data_dir: Path = field(default_factory=lambda: Path("data"))
@@ -39,7 +45,7 @@ class JarvisConfig:
     # Integrations & safety
     webhooks: dict[str, str] = field(default_factory=dict)
     auto_approve_dangerous: bool = False
-    mute_mic_while_speaking: bool = True
+    mute_mic_while_speaking: bool = False
     input_device: str = ""
 
     @classmethod
@@ -80,14 +86,18 @@ class JarvisConfig:
             thinking_level=os.getenv("JARVIS_THINKING_LEVEL", "low").strip(),
             voice_name=os.getenv("JARVIS_VOICE_NAME", "Fenrir").strip(),
             wake_word_model=os.getenv("JARVIS_WAKE_WORD", "hey_jarvis").strip(),
-            wake_threshold=float(os.getenv("JARVIS_WAKE_THRESHOLD", "0.18")),
+            wake_threshold=float(os.getenv("JARVIS_WAKE_THRESHOLD", "0.28")),
+            wake_consecutive_frames=max(1, int(os.getenv("JARVIS_WAKE_CONSECUTIVE_FRAMES", "2"))),
             idle_timeout_sec=float(os.getenv("JARVIS_IDLE_TIMEOUT_SEC", "15")),
+            silence_duration_ms=int(os.getenv("JARVIS_SILENCE_DURATION_MS", "1100")),
+            prefix_padding_ms=int(os.getenv("JARVIS_PREFIX_PADDING_MS", "300")),
+            barge_in_enabled=os.getenv("JARVIS_BARGE_IN_ENABLED", "true").lower() == "true",
             data_dir=data_dir,
             db_path=db_path,
             workspace_dir=workspace,
             webhooks={str(k): str(v) for k, v in parsed_webhooks.items()},
             auto_approve_dangerous=os.getenv("JARVIS_AUTO_APPROVE_DANGEROUS", "false").lower() == "true",
-            mute_mic_while_speaking=os.getenv("JARVIS_MUTE_WHILE_SPEAKING", "true").lower() == "true",
+            mute_mic_while_speaking=os.getenv("JARVIS_MUTE_WHILE_SPEAKING", "false").lower() == "true",
             input_device="",
         )
 

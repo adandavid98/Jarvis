@@ -402,9 +402,16 @@ def test_audio_agc_and_wake_threshold() -> None:
     from jarvis.wake_word import WakeWordDetector
 
     cfg = JarvisConfig.from_env()
-    assert cfg.wake_threshold == 0.18
+    assert cfg.wake_threshold == 0.28
+    assert cfg.wake_consecutive_frames == 2
+    assert cfg.mute_mic_while_speaking is False
+    assert cfg.silence_duration_ms == 1100
+    assert cfg.prefix_padding_ms == 300
+    assert cfg.barge_in_enabled is True
+
     det = WakeWordDetector()
-    assert det.threshold == 0.18
+    assert det.threshold == 0.28
+    assert det.consecutive_frames == 2
 
     stream = AudioInputStream(sample_rate=16000, channels=1, blocksize=1280)
     t = np.linspace(0.0, 0.08, 1280, endpoint=False)
@@ -416,6 +423,224 @@ def test_audio_agc_and_wake_threshold() -> None:
     # AGC should amplify speech well above the raw 600 peak
     assert int(np.max(np.abs(boosted))) > 2000
     assert stream.level_percent >= 20
+
+
+def test_wake_word_multiframe_and_noise_gate() -> None:
+    import numpy as np
+    from jarvis.wake_word import WakeWordDetector
+
+    class _FakeModel:
+        def __init__(self, scores: list[float]) -> None:
+            self.scores = list(scores)
+            self.frames: list[np.ndarray] = []
+
+        def predict(self, frame: np.ndarray) -> dict[str, float]:
+            self.frames.append(frame.copy())
+            val = self.scores.pop(0) if self.scores else 0.0
+            return {"hey_jarvis": val}
+
+        def reset(self) -> None:
+            pass
+
+    t = np.linspace(0.0, 0.08, 1280, endpoint=False)
+    loud_frame = (1500.0 * np.sin(2 * np.pi * 400 * t)).astype(np.int16)
+
+    det = WakeWordDetector(threshold=0.28, consecutive_frames=2, instant_threshold=0.60, min_voice_rms=160.0)
+    det._model = _FakeModel([0.45, 0.10, 0.35, 0.40])
+
+    # Single spike < instant_threshold must NOT trigger
+    hit1, s1 = det.process_frame(loud_frame, speech_active=True)
+    assert hit1 is False and abs(s1 - 0.45) < 1e-6
+
+    # Drop resets streak
+    hit2, _ = det.process_frame(loud_frame, speech_active=True)
+    assert hit2 is False
+
+    # Two consecutive frames >= 0.28 MUST trigger
+    hit3, _ = det.process_frame(loud_frame, speech_active=True)
+    assert hit3 is False
+    hit4, s4 = det.process_frame(loud_frame, speech_active=True)
+    assert hit4 is True and abs(s4 - 0.40) < 1e-6
+
+    # Non-speech ambient noise flushes zeros and resets streak
+    fake_silent = _FakeModel([0.55])
+    det2 = WakeWordDetector(threshold=0.28, consecutive_frames=2, instant_threshold=0.60, min_voice_rms=160.0)
+    det2._model = fake_silent
+    hit_sil, score_sil = det2.process_frame(loud_frame, speech_active=False)
+    assert hit_sil is False and score_sil == 0.0
+    assert int(np.max(np.abs(fake_silent.frames[0]))) == 0
+
+
+def test_echo_canceller_and_barge_in_and_preroll() -> None:
+    import numpy as np
+    from jarvis.audio import AudioInputStream, EchoCanceller, PlaybackReferenceBuffer
+
+    ref_buf = PlaybackReferenceBuffer(target_rate=16000, max_seconds=3.0)
+    t24 = np.linspace(0.0, 0.24, int(24000 * 0.24), endpoint=False)
+    speaker_24k = (8000.0 * np.sin(2 * np.pi * 320 * t24) + 4000.0 * np.sin(2 * np.pi * 640 * t24)).astype(np.int16)
+    ref_buf.push_24k(speaker_24k, source_rate=24000)
+
+    hist, active = ref_buf.snapshot(max_samples=6400)
+    assert active is True and len(hist) > 1280
+
+    # Simulate acoustic path: 400-sample delay + 0.5x attenuation
+    delay = 400
+    mic_echo = (0.5 * hist[-(1280 + delay):-delay]).astype(np.int16)
+    aec = EchoCanceller(num_taps=25, max_lag_samples=2880)
+    cleaned_echo, dt_echo = aec.process(mic_echo, hist, noise_rms=60.0)
+    assert dt_echo is False
+    assert float(np.sqrt(np.mean(cleaned_echo.astype(np.float32) ** 2))) < float(np.sqrt(np.mean(mic_echo.astype(np.float32) ** 2))) * 0.5
+
+    # Now overlay strong near-end speech (different frequency & uncorrelated) -> double talk!
+    t16 = np.linspace(0.0, 0.08, 1280, endpoint=False)
+    near_speech = (4500.0 * np.sin(2 * np.pi * 950 * t16)).astype(np.int16)
+    mic_double = np.clip(mic_echo.astype(np.int32) + near_speech.astype(np.int32), -32768, 32767).astype(np.int16)
+    _, dt_speech = aec.process(mic_double, hist, noise_rms=60.0)
+    assert dt_speech is True
+
+    # Test AudioInputStream pre-roll capture on onset & barge-in callback
+    barge_calls = 0
+
+    def _on_barge() -> None:
+        nonlocal barge_calls
+        barge_calls += 1
+
+    stream = AudioInputStream(
+        sample_rate=16000,
+        channels=1,
+        blocksize=1280,
+        playback_ref=ref_buf,
+        on_barge_in=_on_barge,
+        barge_in_enabled=True,
+    )
+    silence = np.zeros(1280, dtype=np.int16)
+    stream._process_dual_branch(silence)
+    stream._process_dual_branch(silence)
+    assert stream.is_speech_active is False
+
+    # Feed near-end voice frames while playback is active -> barge-in + pre-roll
+    stream._process_dual_branch(mic_double)
+    stream._process_dual_branch(mic_double)
+    assert stream.is_speech_active is True
+    assert barge_calls >= 1
+    assert len(stream._pending_preroll) >= 1
+
+
+def test_live_config_vad_and_quota_recovery(tmp_path: Path) -> None:
+    import asyncio
+    from contextlib import asynccontextmanager
+    import numpy as np
+    from google.genai import types
+    from jarvis.config import JarvisConfig
+    from jarvis.live_session import JarvisLiveSession
+    from jarvis.memory import JarvisMemory
+    from jarvis.tools import build_default_registry
+
+    cfg = JarvisConfig(
+        gemini_api_key="dummy-key",
+        db_path=tmp_path / "m.db",
+        data_dir=tmp_path,
+        silence_duration_ms=1100,
+        prefix_padding_ms=300,
+        barge_in_enabled=True,
+    )
+    mem = JarvisMemory(cfg.db_path)
+    reg = build_default_registry(cfg, mem)
+    session = JarvisLiveSession(cfg, mem, reg)
+    live_cfg = session.build_live_config(text_only=False)
+    ric = live_cfg.realtime_input_config
+    assert ric is not None
+    assert ric.automatic_activity_detection.end_of_speech_sensitivity == types.EndSensitivity.END_SENSITIVITY_LOW
+    assert ric.automatic_activity_detection.start_of_speech_sensitivity == types.StartSensitivity.START_SENSITIVITY_HIGH
+    assert ric.automatic_activity_detection.silence_duration_ms == 1100
+    assert ric.automatic_activity_detection.prefix_padding_ms == 300
+    assert ric.activity_handling == types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS
+    assert ric.turn_coverage == types.TurnCoverage.TURN_INCLUDES_ONLY_ACTIVITY
+
+    sent_calls: list[dict[str, object]] = []
+
+    class _FakeGeminiSession:
+        async def send_realtime_input(self, **kwargs: object) -> None:
+            sent_calls.append(kwargs)
+
+        async def send_client_content(self, **kwargs: object) -> None:
+            pass
+
+        async def receive(self):
+            while True:
+                await asyncio.sleep(0.05)
+                if False:
+                    yield None
+
+    class _FakeLive:
+        @asynccontextmanager
+        async def connect(self, **kwargs: object):
+            yield _FakeGeminiSession()
+
+    class _FakeAio:
+        def __init__(self) -> None:
+            self.live = _FakeLive()
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.aio = _FakeAio()
+
+    session._client = _FakeClient()  # type: ignore[assignment]
+
+    # Create cached wake greeting PCM so wake_greeting replays locally without prompt
+    greeting_pcm_path = tmp_path / "wake_greeting_24k.pcm"
+    greeting_pcm_path.write_bytes(b"\x01\x00" * 5000)
+
+    class _FakeAudioOut:
+        def __init__(self) -> None:
+            self.enqueued: list[bytes] = []
+            self.is_playing = False
+
+        def enqueue(self, pcm: bytes) -> None:
+            self.enqueued.append(pcm)
+
+        def clear(self) -> None:
+            pass
+
+    class _FakeAudioIn:
+        def __init__(self) -> None:
+            self.is_speech_active = True
+
+        def drain(self) -> None:
+            pass
+
+    async def _exercise_session() -> str:
+        mic_q: asyncio.Queue[np.ndarray] = asyncio.Queue()
+        fake_in = _FakeAudioIn()
+        fake_out = _FakeAudioOut()
+
+        async def _feed() -> None:
+            fake_in.is_speech_active = True
+            await mic_q.put(np.ones(1280, dtype=np.int16) * 200)
+            await asyncio.sleep(0.03)
+            fake_in.is_speech_active = False
+            await mic_q.put(np.zeros(1280, dtype=np.int16))
+            await asyncio.sleep(0.03)
+            session.request_standby()
+
+        feeder = asyncio.create_task(_feed())
+        reason = await session.run_voice_session(
+            fake_in,  # type: ignore[arg-type]
+            fake_out,  # type: ignore[arg-type]
+            mic_q,
+            idle_timeout_sec=5.0,
+            wake_greeting=True,
+        )
+        await feeder
+        assert len(fake_out.enqueued) == 1
+        return reason
+
+    reason = asyncio.run(_exercise_session())
+    assert reason == "standby"
+    assert any("audio" in c for c in sent_calls)
+    assert any(c.get("audio_stream_end") is True for c in sent_calls)
+    assert not any("text" in c for c in sent_calls)
+
 
 
 

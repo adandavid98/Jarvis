@@ -130,6 +130,17 @@ class JarvisLiveSession:
                 )
             )
             kwargs["input_audio_transcription"] = types.AudioTranscriptionConfig()
+            kwargs["realtime_input_config"] = types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    disabled=False,
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                    prefix_padding_ms=self.config.prefix_padding_ms,
+                    silence_duration_ms=self.config.silence_duration_ms,
+                ),
+                activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+                turn_coverage=types.TurnCoverage.TURN_INCLUDES_ONLY_ACTIVITY,
+            )
 
         # thinking_config is only supported on extended-thinking models
         if "extended-thinking" in self.config.model:
@@ -201,40 +212,84 @@ class JarvisLiveSession:
 
         standby_event = asyncio.Event()
         self._standby_event = standby_event
+        greeting_cache_path = self.config.data_dir / "wake_greeting_24k.pcm"
+        use_cached_greeting = (
+            wake_greeting
+            and not initial_prompt
+            and greeting_cache_path.exists()
+            and greeting_cache_path.stat().st_size > 8000
+        )
+        recording_greeting = bool(wake_greeting and not initial_prompt and not use_cached_greeting)
+        greeting_pcm = bytearray()
+
+        if wake_greeting and not initial_prompt:
+            # Never inherit stale resumption context across separate wake-word activations
+            self._resumption_handle = None
+
         async with self._client.aio.live.connect(
             model=self.config.model,
             config=live_config,
         ) as session:
+            greeting_state_task: asyncio.Task[None] | None = None
             if initial_prompt:
                 self.memory.log_message("user", initial_prompt, source="desktop")
                 await self._emit({"type": "transcript", "role": "user", "text": initial_prompt, "final": True})
                 await session.send_realtime_input(text=initial_prompt)
+            elif use_cached_greeting:
+                audio_out.enqueue(greeting_cache_path.read_bytes())
+                await self._emit({"type": "state", "state": "speaking"})
+                await self._emit(
+                    {"type": "transcript", "role": "jarvis", "text": "Hola, ¿cómo te ayudo?", "final": True}
+                )
+                last_activity = time.monotonic()
+
+                async def _reset_state_after_greeting() -> None:
+                    while audio_out.is_playing:
+                        await asyncio.sleep(0.1)
+                    await self._emit({"type": "state", "state": "listening"})
+
+                greeting_state_task = asyncio.create_task(_reset_state_after_greeting())
             elif wake_greeting:
                 await session.send_realtime_input(
                     text=(
                         "[Sistema: El usuario acaba de activarte con 'Hey Jarvis'. "
-                        "Responde brevemente diciendo 'Hola, ¿cómo te ayudo?' y quédate escuchando.]"
+                        "Responde una única vez diciendo exactamente 'Hola, ¿cómo te ayudo?' y quédate escuchando.]"
                     )
                 )
 
             async def _send_mic_loop() -> None:
                 nonlocal last_activity
                 was_muted = False
+                was_streaming_speech = False
                 while True:
                     frame = await mic_queue.get()
                     if self.config.mute_mic_while_speaking and audio_out.is_playing:
                         was_muted = True
+                        if was_streaming_speech:
+                            was_streaming_speech = False
+                            with contextlib.suppress(Exception):
+                                await session.send_realtime_input(audio_stream_end=True)
                         continue
                     if was_muted:
                         was_muted = False
                         audio_in.drain()
                         continue
-                    await session.send_realtime_input(
-                        audio=types.Blob(
-                            data=frame.tobytes(),
-                            mime_type=f"audio/pcm;rate={self.config.input_sample_rate}",
+
+                    raw_flag = getattr(audio_in, "is_speech_active", True)
+                    speech_active = raw_flag if isinstance(raw_flag, bool) else True
+
+                    if speech_active:
+                        was_streaming_speech = True
+                        last_activity = time.monotonic()
+                        await session.send_realtime_input(
+                            audio=types.Blob(
+                                data=frame.tobytes(),
+                                mime_type=f"audio/pcm;rate={self.config.input_sample_rate}",
+                            )
                         )
-                    )
+                    elif was_streaming_speech:
+                        was_streaming_speech = False
+                        await session.send_realtime_input(audio_stream_end=True)
 
             async def _send_text_loop() -> None:
                 nonlocal last_activity
@@ -311,11 +366,17 @@ class JarvisLiveSession:
                         if content:
                             if content.interrupted is True:
                                 audio_out.clear()
+                                turn_idle = True
+                                recording_greeting = False
+                                await _flush_speaker(active_speaker)
+                                await self._emit({"type": "state", "state": "listening"})
 
                             if content.model_turn and content.model_turn.parts:
                                 turn_idle = False
                                 for part in content.model_turn.parts:
                                     if part.inline_data and part.inline_data.data:
+                                        if recording_greeting:
+                                            greeting_pcm.extend(part.inline_data.data)
                                         audio_out.enqueue(part.inline_data.data)
                                         await self._emit({"type": "state", "state": "speaking"})
 
@@ -330,6 +391,11 @@ class JarvisLiveSession:
                             if content.turn_complete:
                                 turn_idle = True
                                 last_activity = time.monotonic()
+                                if recording_greeting:
+                                    recording_greeting = False
+                                    if len(greeting_pcm) > 8000:
+                                        greeting_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                                        greeting_cache_path.write_bytes(bytes(greeting_pcm))
                                 await _flush_speaker(active_speaker)
                                 await self._emit({"type": "state", "state": "listening"})
 
@@ -402,8 +468,10 @@ class JarvisLiveSession:
                 end_reason = "cancelled"
                 raise
             finally:
+                if greeting_state_task is not None and not greeting_state_task.done():
+                    greeting_state_task.cancel()
                 self._standby_event = None
-                if end_reason in {"cancelled", "standby"}:
+                if end_reason in {"cancelled", "standby", "idle_timeout"}:
                     self._resumption_handle = None
                 for t in list(active_tasks):
                     t.cancel()
