@@ -14,7 +14,7 @@ from typing import Any
 import psutil
 from websockets.asyncio.server import ServerConnection, serve
 
-from jarvis.audio import AudioInputStream, AudioOutputStream, list_input_devices
+from jarvis.audio import AudioInputStream, AudioOutputStream, list_input_devices, refresh_audio_devices
 from jarvis.config import JarvisConfig
 from jarvis.live_session import JarvisLiveSession
 from jarvis.memory import JarvisMemory
@@ -251,6 +251,14 @@ class JarvisBridge:
     async def _run_voice_loop(self, mode: str) -> None:
         self._voice_mode = mode
         use_wakeword = mode == "wakeword"
+        refresh_audio_devices()
+        await self._broadcast(
+            {
+                "type": "input_devices",
+                "devices": list_input_devices(),
+                "selected": self.config.input_device,
+            }
+        )
         audio_in = AudioInputStream(
             sample_rate=self.config.input_sample_rate,
             channels=self.config.audio_channels,
@@ -565,6 +573,16 @@ class JarvisBridge:
                 await self._broadcast(self.build_memory_snapshot())
         elif action == "refresh_memory":
             await self._broadcast(self.build_memory_snapshot())
+        elif action == "refresh_devices":
+            if not (self._voice_task and not self._voice_task.done()):
+                refresh_audio_devices()
+            await self._broadcast(
+                {
+                    "type": "input_devices",
+                    "devices": list_input_devices(),
+                    "selected": self.config.input_device,
+                }
+            )
         elif action == "set_input_device":
             device = str(data.get("device", "")).strip()
             self.config.save_input_device(device)

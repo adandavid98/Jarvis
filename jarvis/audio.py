@@ -11,11 +11,37 @@ import numpy as np
 import sounddevice as sd
 
 
+def refresh_audio_devices() -> None:
+    """Re-initialize PortAudio so hot-plugged Windows mics/headphones are detected."""
+    try:
+        sd._terminate()
+        sd._initialize()
+    except Exception:
+        pass
+
+
+def get_wasapi_default_device(kind: str) -> int | None:
+    """Return the Windows WASAPI default input/output device index if available."""
+    try:
+        for host in sd.query_hostapis():
+            if "wasapi" in str(host.get("name", "")).lower():
+                key = "default_input_device" if kind == "input" else "default_output_device"
+                idx = int(host.get(key, -1))
+                if idx >= 0:
+                    return idx
+    except Exception:
+        pass
+    return None
+
+
 def list_input_devices() -> list[dict[str, Any]]:
     """Return available audio input devices with host API labels."""
     devices: list[dict[str, Any]] = []
     try:
-        default_in = sd.default.device[0] if isinstance(sd.default.device, (list, tuple)) else sd.default.device
+        wasapi_in = get_wasapi_default_device("input")
+        default_in = wasapi_in if wasapi_in is not None else (
+            sd.default.device[0] if isinstance(sd.default.device, (list, tuple)) else sd.default.device
+        )
         for idx, info in enumerate(sd.query_devices()):
             if int(info.get("max_input_channels", 0)) <= 0:
                 continue
@@ -121,6 +147,8 @@ class AudioInputStream:
         self._loop = loop
         self._queue = asyncio.Queue(maxsize=self.max_queue_frames)
         dev_idx = self._resolve_device(self.device)
+        if dev_idx is None:
+            dev_idx = get_wasapi_default_device("input")
         try:
             self._capture_sample_rate = self.sample_rate
             self._stream = sd.InputStream(
@@ -133,7 +161,11 @@ class AudioInputStream:
             )
             self._stream.start()
         except sd.PortAudioError:
-            info = sd.query_devices(dev_idx, kind="input")
+            try:
+                info = sd.query_devices(dev_idx, kind="input")
+            except Exception:
+                dev_idx = None
+                info = sd.query_devices(None, kind="input")
             native_sr = int(round(float(info.get("default_samplerate", 44100))))
             if native_sr <= 0:
                 native_sr = 44100
@@ -216,13 +248,24 @@ class AudioOutputStream:
         """Open and start the speaker output stream."""
         if self._stream is not None:
             return
-        self._stream = sd.OutputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            dtype="int16",
-            callback=self._callback,
-        )
-        self._stream.start()
+        dev_idx = get_wasapi_default_device("output")
+        try:
+            self._stream = sd.OutputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype="int16",
+                device=dev_idx,
+                callback=self._callback,
+            )
+            self._stream.start()
+        except sd.PortAudioError:
+            self._stream = sd.OutputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype="int16",
+                callback=self._callback,
+            )
+            self._stream.start()
 
     def enqueue(self, pcm_bytes: bytes) -> None:
         """Append 24 kHz int16 PCM bytes for playback."""

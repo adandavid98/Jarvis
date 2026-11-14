@@ -273,6 +273,11 @@ if (micSelect) {
   });
 }
 
+const btnRefreshMic = document.getElementById('btn-refresh-mic');
+if (btnRefreshMic) {
+  btnRefreshMic.onclick = () => sendCmd({ action: 'refresh_devices' });
+}
+
 chatForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const text = chatInput.value.trim();
@@ -432,7 +437,7 @@ function connectBridge() {
     } else if (data.type === 'input_devices') {
       if (micSelect && Array.isArray(data.devices)) {
         const selected = String(data.selected ?? '');
-        micSelect.innerHTML = '<option value="">Default Windows Mic</option>';
+        micSelect.innerHTML = '<option value="">Default Windows Mic (Auto)</option>';
         for (const d of data.devices) {
           const opt = document.createElement('option');
           opt.value = String(d.index);
