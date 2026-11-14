@@ -1,6 +1,6 @@
 {
   "name": "jarvis-desktop",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Futuristic Windows desktop HUD for Jarvis voice & text automation",
   "main": "main.js",
   "scripts": {

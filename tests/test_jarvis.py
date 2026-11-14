@@ -313,3 +313,87 @@ def test_bridge_save_api_key_and_wakeword_fallback(tmp_path: Path, monkeypatch: 
     asyncio.run(run())
 
 
+def test_create_document_pdf_docx_and_full_pc_access(tmp_path: Path) -> None:
+    outside_dir = tmp_path / "downloads_sim"
+    ws_dir = tmp_path / "workspace"
+    ws_dir.mkdir()
+    cfg = JarvisConfig(
+        gemini_api_key="test-key",
+        db_path=tmp_path / "jarvis.db",
+        workspace_dir=ws_dir,
+        auto_approve_dangerous=True,
+    )
+    memory = JarvisMemory(cfg.db_path)
+    registry = build_default_registry(cfg, memory)
+
+    async def run() -> None:
+        pdf_path = outside_dir / "informe.pdf"
+        pdf_res = await registry.execute(
+            "create_document",
+            {"path": str(pdf_path), "title": "Informe Jarvis", "content": "Contenido en español con acentos: áéíóúñ."},
+        )
+        assert pdf_res["status"] == "ok"
+        assert pdf_path.exists() and pdf_path.stat().st_size > 100
+
+        docx_path = outside_dir / "nota.docx"
+        docx_res = await registry.execute(
+            "create_document",
+            {"path": str(docx_path), "title": "Nota", "content": "Línea 1\nLínea 2"},
+        )
+        assert docx_res["status"] == "ok"
+        assert docx_path.exists() and docx_path.stat().st_size > 100
+
+        txt_path = outside_dir / "codigo.py"
+        await registry.execute("write_file", {"path": str(txt_path), "content": "x = 1\n"})
+        edit_res = await registry.execute(
+            "edit_file",
+            {"path": str(txt_path), "target_text": "x = 1", "replacement": "x = 42"},
+        )
+        assert edit_res["status"] == "ok"
+        assert txt_path.read_text(encoding="utf-8") == "x = 42\n"
+
+    asyncio.run(run())
+
+
+def test_bridge_tasks_only_track_tool_actions(tmp_path: Path) -> None:
+    from jarvis.bridge import JarvisBridge
+
+    cfg = JarvisConfig(
+        gemini_api_key="test-key",
+        data_dir=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        workspace_dir=tmp_path,
+    )
+    bridge = JarvisBridge(config=cfg)
+    events: list[dict[str, object]] = []
+
+    async def fake_broadcast(payload: dict[str, object]) -> None:
+        events.append(payload)
+
+    bridge._broadcast = fake_broadcast  # type: ignore[method-assign]
+
+    async def run() -> None:
+        # Plain chat without tools should not create a task_run
+        await bridge._on_session_event({"type": "transcript", "role": "user", "text": "Hola Jarvis", "final": True})
+        await bridge._on_session_event({"type": "transcript", "role": "jarvis", "text": "Hola, ¿en qué ayudo?", "final": True})
+        assert bridge.memory.recent_task_runs(limit=10) == []
+
+        # Chat with a tool call should create a task_run with concise action summary
+        await bridge._on_session_event({"type": "transcript", "role": "user", "text": "Crea un pdf", "final": True})
+        await bridge._on_session_event({
+            "type": "tool",
+            "phase": "done",
+            "name": "create_document",
+            "status": "ok",
+            "args": {"path": "C:/Users/demo/Downloads/doc.pdf"},
+            "result": {"status": "ok", "path": "C:/Users/demo/Downloads/doc.pdf"},
+        })
+        await bridge._on_session_event({"type": "transcript", "role": "jarvis", "text": "Listo.", "final": True})
+        tasks = bridge.memory.recent_task_runs(limit=10)
+        assert len(tasks) == 1
+        assert "Created document: C:/Users/demo/Downloads/doc.pdf" in tasks[0]["summary"]
+
+    asyncio.run(run())
+
+
+

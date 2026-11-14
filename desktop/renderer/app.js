@@ -182,7 +182,7 @@ function actionIcon(kind) {
 function renderTaskFeed() {
   taskFeed.innerHTML = '';
   const visible = taskRuns
-    .filter((t) => t.status === 'running' || (t.actions && t.actions.length > 0) || t.summary)
+    .filter((t) => t.actions && t.actions.length > 0)
     .slice(-MAX_RECENT_ITEMS);
 
   if (visible.length === 0) {

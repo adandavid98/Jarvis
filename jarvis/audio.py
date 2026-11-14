@@ -20,14 +20,33 @@ class AudioInputStream:
         channels: int = 1,
         blocksize: int = 1280,
         max_queue_frames: int = 100,
+        device: int | str | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.channels = channels
         self.blocksize = blocksize
         self.max_queue_frames = max_queue_frames
+        self.device = device
+        self.last_peak: int = 0
+        self._capture_sample_rate: int = sample_rate
         self._loop: asyncio.AbstractEventLoop | None = None
         self._queue: asyncio.Queue[np.ndarray] | None = None
         self._stream: sd.InputStream | None = None
+
+    @staticmethod
+    def _resolve_device(device: int | str | None) -> int | None:
+        if device is None or device == "":
+            return None
+        if isinstance(device, int):
+            return device
+        text = str(device).strip()
+        if text.isdigit():
+            return int(text)
+        needle = text.lower()
+        for idx, info in enumerate(sd.query_devices()):
+            if int(info.get("max_input_channels", 0)) > 0 and needle in str(info.get("name", "")).lower():
+                return idx
+        return None
 
     def _callback(
         self,
@@ -39,6 +58,13 @@ class AudioInputStream:
         if self._loop is None or self._queue is None:
             return
         chunk = indata[:, 0].copy()
+        if self._capture_sample_rate != self.sample_rate and len(chunk) > 1:
+            target_len = max(1, int(round(len(chunk) * self.sample_rate / self._capture_sample_rate)))
+            x_old = np.linspace(0.0, 1.0, num=len(chunk), endpoint=False)
+            x_new = np.linspace(0.0, 1.0, num=target_len, endpoint=False)
+            chunk = np.interp(x_new, x_old, chunk.astype(np.float32)).astype(np.int16)
+        if len(chunk) > 0:
+            self.last_peak = int(np.max(np.abs(chunk)))
         self._loop.call_soon_threadsafe(self._enqueue_nonblocking, chunk)
 
     def _enqueue_nonblocking(self, chunk: np.ndarray) -> None:
@@ -60,14 +86,34 @@ class AudioInputStream:
             raise RuntimeError("AudioInputStream is already started.")
         self._loop = loop
         self._queue = asyncio.Queue(maxsize=self.max_queue_frames)
-        self._stream = sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            dtype="int16",
-            blocksize=self.blocksize,
-            callback=self._callback,
-        )
-        self._stream.start()
+        dev_idx = self._resolve_device(self.device)
+        try:
+            self._capture_sample_rate = self.sample_rate
+            self._stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype="int16",
+                blocksize=self.blocksize,
+                device=dev_idx,
+                callback=self._callback,
+            )
+            self._stream.start()
+        except sd.PortAudioError:
+            info = sd.query_devices(dev_idx, kind="input")
+            native_sr = int(round(float(info.get("default_samplerate", 44100))))
+            if native_sr <= 0:
+                native_sr = 44100
+            self._capture_sample_rate = native_sr
+            scaled_block = max(256, int(round(self.blocksize * native_sr / self.sample_rate)))
+            self._stream = sd.InputStream(
+                samplerate=native_sr,
+                channels=self.channels,
+                dtype="int16",
+                blocksize=scaled_block,
+                device=dev_idx,
+                callback=self._callback,
+            )
+            self._stream.start()
         return self._queue
 
     def drain(self) -> None:

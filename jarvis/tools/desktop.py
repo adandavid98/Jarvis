@@ -198,7 +198,7 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             path,
             allow_outside=config.auto_approve_dangerous,
         )
-        if target.exists() and not overwrite:
+        if target.exists() and not (overwrite or config.auto_approve_dangerous):
             return {
                 "status": "needs_confirmation",
                 "path": str(target),
@@ -211,6 +211,94 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             "status": "ok",
             "path": str(target),
             "bytes_written": len(content.encode("utf-8")),
+        }
+
+    def edit_file(path: str, target_text: str, replacement: str) -> dict[str, Any]:
+        target = resolve_workspace_path(
+            config.workspace_dir,
+            path,
+            allow_outside=config.auto_approve_dangerous,
+        )
+        if not target.is_file():
+            return {"status": "error", "error": f"File not found: {target}"}
+        original = target.read_text(encoding="utf-8", errors="replace")
+        if target_text not in original:
+            return {"status": "error", "error": "Target text not found in file."}
+        updated = original.replace(target_text, replacement, 1)
+        target.write_text(updated, encoding="utf-8")
+        return {"status": "ok", "path": str(target), "bytes_written": len(updated.encode("utf-8"))}
+
+    def create_document(
+        path: str,
+        title: str = "",
+        content: str = "",
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        target = resolve_workspace_path(
+            config.workspace_dir,
+            path,
+            allow_outside=config.auto_approve_dangerous,
+        )
+        if target.exists() and not (overwrite or config.auto_approve_dangerous):
+            return {
+                "status": "needs_confirmation",
+                "path": str(target),
+                "message": "File already exists. Ask user to confirm overwriting, then pass overwrite=true.",
+            }
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        ext = target.suffix.lower()
+        clean_title = title.strip()
+
+        if ext == ".pdf":
+            from fpdf import FPDF
+
+            pdf = FPDF()
+            pdf.set_auto_page_break(auto=True, margin=15)
+            pdf.add_page()
+
+            font_family = "Helvetica"
+            unicode_font = Path(r"C:\Windows\Fonts\arial.ttf")
+            if unicode_font.exists():
+                pdf.add_font("ArialUnicode", "", str(unicode_font))
+                bold_font = Path(r"C:\Windows\Fonts\arialbd.ttf")
+                if bold_font.exists():
+                    pdf.add_font("ArialUnicode", "B", str(bold_font))
+                font_family = "ArialUnicode"
+
+            if clean_title:
+                pdf.set_font(font_family, "B" if font_family != "ArialUnicode" or Path(r"C:\Windows\Fonts\arialbd.ttf").exists() else "", 16)
+                pdf.multi_cell(0, 9, clean_title)
+                pdf.ln(3)
+
+            pdf.set_font(font_family, "", 11)
+            for paragraph in content.splitlines():
+                if paragraph.strip():
+                    pdf.multi_cell(0, 6.5, paragraph)
+                else:
+                    pdf.ln(4)
+            pdf.output(str(target))
+        elif ext == ".docx":
+            from docx import Document
+
+            doc = Document()
+            if clean_title:
+                doc.add_heading(clean_title, level=1)
+            for paragraph in content.splitlines():
+                if paragraph.strip():
+                    doc.add_paragraph(paragraph)
+            doc.save(str(target))
+        else:
+            full_text = f"# {clean_title}\n\n{content}" if (clean_title and ext == ".md") else (
+                f"{clean_title}\n\n{content}" if clean_title else content
+            )
+            target.write_text(full_text, encoding="utf-8")
+
+        return {
+            "status": "ok",
+            "path": str(target),
+            "format": ext.lstrip(".") or "txt",
+            "bytes_written": target.stat().st_size,
         }
 
     def web_search(query: str) -> dict[str, Any]:
@@ -333,16 +421,49 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
     registry.register(
         ToolSpec(
             name="write_file",
-            description="Create or update a file inside the workspace directory.",
+            description="Create or update a text/code file at any accessible path.",
             parameters={
                 "type": "OBJECT",
                 "properties": {
-                    "path": {"type": "STRING", "description": "Path inside the workspace."},
+                    "path": {"type": "STRING", "description": "Relative or absolute file path."},
                     "content": {"type": "STRING", "description": "Full text content to write."},
-                    "overwrite": {"type": "BOOLEAN", "description": "Must be true to overwrite an existing file."},
+                    "overwrite": {"type": "BOOLEAN", "description": "Set true to overwrite an existing file."},
                 },
                 "required": ["path", "content"],
             },
             handler=write_file,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="edit_file",
+            description="Replace a specific text block inside an existing file.",
+            parameters={
+                "type": "OBJECT",
+                "properties": {
+                    "path": {"type": "STRING", "description": "Relative or absolute file path."},
+                    "target_text": {"type": "STRING", "description": "Exact existing text to replace."},
+                    "replacement": {"type": "STRING", "description": "New text to substitute."},
+                },
+                "required": ["path", "target_text", "replacement"],
+            },
+            handler=edit_file,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="create_document",
+            description="Create a formatted document (.pdf, .docx, .md, .txt, .html) at any path such as Downloads, Desktop, or Documents.",
+            parameters={
+                "type": "OBJECT",
+                "properties": {
+                    "path": {"type": "STRING", "description": "Output file path ending in .pdf, .docx, .md, .txt, or .html."},
+                    "title": {"type": "STRING", "description": "Optional document heading/title."},
+                    "content": {"type": "STRING", "description": "Full body text of the document."},
+                    "overwrite": {"type": "BOOLEAN", "description": "Set true to overwrite an existing file."},
+                },
+                "required": ["path", "content"],
+            },
+            handler=create_document,
         )
     )

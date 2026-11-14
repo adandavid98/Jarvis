@@ -47,6 +47,7 @@ class JarvisBridge:
         self._detector: WakeWordDetector | None = None
         self._telemetry_paused: bool = False
         self._active_task: dict[str, Any] | None = None
+        self._pending_task_prompt: str = ""
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
         if not self._clients:
@@ -90,10 +91,11 @@ class JarvisBridge:
             else:
                 title = f"Opened {raw_target}"
                 target = raw_target
-        elif name in {"write_file", "edit_file"}:
+        elif name in {"write_file", "edit_file", "create_document"}:
             kind = "file_edit"
-            path = str(args.get("path") or res.get("path") or "")
-            title = f"Updated file: {path}"
+            path = str(res.get("path") or args.get("path") or "")
+            verb = "Created document" if name == "create_document" else "Updated file"
+            title = f"{verb}: {path}"
             target = path
         elif name == "run_shell_command":
             kind = "command"
@@ -127,7 +129,7 @@ class JarvisBridge:
 
     async def _record_tool_action(self, payload: dict[str, Any]) -> None:
         if self._active_task is None:
-            await self._start_task("Voice / Background command")
+            await self._start_task(self._pending_task_prompt or "Voice / Background command")
         assert self._active_task is not None
         name = str(payload.get("name", "tool"))
         args = payload.get("args") or {}
@@ -158,17 +160,37 @@ class JarvisBridge:
         )
         await self._broadcast({"type": "task_event", "event": "updated", "task": self._active_task})
 
+    @staticmethod
+    def _summarize_actions(actions: list[dict[str, Any]], fallback_text: str) -> str:
+        done_titles = [
+            str(a.get("title", "")).strip()
+            for a in actions
+            if a.get("title")
+        ]
+        if done_titles:
+            joined = " · ".join(done_titles[:3])
+            if len(done_titles) > 3:
+                joined += f" (+{len(done_titles) - 3} more)"
+            return joined[:220]
+        cleaned = " ".join(fallback_text.split())
+        return cleaned[:180] + ("..." if len(cleaned) > 180 else "")
+
     async def _complete_task(self, summary: str) -> None:
+        self._pending_task_prompt = ""
         if self._active_task is None:
             return
         actions = list(self._active_task.get("actions") or [])
+        if not actions:
+            self._active_task = None
+            return
         has_error = any(a.get("status") == "error" for a in actions)
         final_status = "error" if has_error else "done"
+        concise_summary = self._summarize_actions(actions, summary)
         task = self.memory.upsert_task_run(
             task_id=self._active_task["task_id"],
             prompt=self._active_task["prompt"],
             status=final_status,
-            summary=summary.strip(),
+            summary=concise_summary,
             actions=actions,
         )
         self._active_task = None
@@ -184,7 +206,7 @@ class JarvisBridge:
             role = str(payload.get("role", "")).lower()
             text = str(payload.get("text", "")).strip()
             if role in {"you", "user"} and text:
-                await self._start_task(text)
+                self._pending_task_prompt = text
             elif role == "jarvis" and text:
                 await self._complete_task(text)
             await self._broadcast(self.build_memory_snapshot())
@@ -230,14 +252,22 @@ class JarvisBridge:
             sample_rate=self.config.input_sample_rate,
             channels=self.config.audio_channels,
             blocksize=self.config.input_chunk_samples,
+            device=self.config.input_device or None,
         )
         audio_out = AudioOutputStream(
             sample_rate=self.config.output_sample_rate,
             channels=self.config.audio_channels,
         )
         loop = asyncio.get_running_loop()
-        mic_queue = audio_in.start(loop)
-        audio_out.start()
+        try:
+            mic_queue = audio_in.start(loop)
+            audio_out.start()
+        except Exception as exc:
+            await self._broadcast({"type": "error", "message": f"Audio device error ({type(exc).__name__}: {exc})"})
+            audio_in.stop()
+            audio_out.stop()
+            await self._set_state("stopped")
+            return
 
         try:
             if use_wakeword and self._detector is None:
@@ -493,7 +523,7 @@ class JarvisBridge:
             text = str(data.get("text", "")).strip()
             if not text:
                 return
-            await self._start_task(text)
+            self._pending_task_prompt = text
             if self._outbound_text_queue is not None and self._voice_task and not self._voice_task.done():
                 await self._outbound_text_queue.put(text)
             else:

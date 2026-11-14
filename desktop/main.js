@@ -27,6 +27,7 @@ function startPythonBridge() {
         ...process.env,
         JARVIS_DATA_DIR: userDataDir,
         JARVIS_WORKSPACE_DIR: docsDir,
+        JARVIS_AUTO_APPROVE_DANGEROUS: process.env.JARVIS_AUTO_APPROVE_DANGEROUS ?? 'true',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -36,6 +37,10 @@ function startPythonBridge() {
     const pythonExe = path.join(rootDir, '.venv', 'Scripts', 'python.exe');
     bridgeProc = spawn(pythonExe, ['-m', 'jarvis.bridge', ...args], {
       cwd: rootDir,
+      env: {
+        ...process.env,
+        JARVIS_AUTO_APPROVE_DANGEROUS: process.env.JARVIS_AUTO_APPROVE_DANGEROUS ?? 'true',
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });

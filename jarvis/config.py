@@ -40,6 +40,7 @@ class JarvisConfig:
     webhooks: dict[str, str] = field(default_factory=dict)
     auto_approve_dangerous: bool = False
     mute_mic_while_speaking: bool = True
+    input_device: str = ""
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> JarvisConfig:
@@ -87,6 +88,7 @@ class JarvisConfig:
             webhooks={str(k): str(v) for k, v in parsed_webhooks.items()},
             auto_approve_dangerous=os.getenv("JARVIS_AUTO_APPROVE_DANGEROUS", "false").lower() == "true",
             mute_mic_while_speaking=os.getenv("JARVIS_MUTE_WHILE_SPEAKING", "true").lower() == "true",
+            input_device=os.getenv("JARVIS_INPUT_DEVICE", "").strip(),
         )
 
     @property

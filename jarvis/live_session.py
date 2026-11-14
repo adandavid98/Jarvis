@@ -21,8 +21,9 @@ _BASE_SYSTEM_INSTRUCTION = """You are Jarvis, a sharp, concise, proactive deskto
 
 Guidelines:
 - Always respond in the same language the user speaks — seamlessly supporting English, Spanish, and any other language they switch to.
-- Keep spoken responses crisp, natural, and conversational — avoid reading long file paths, raw JSON, or huge terminal logs aloud unless asked; summarize key outcomes instead.
-- You have asynchronous NON_BLOCKING tools for Windows desktop control, file management, reminders/memory, webhooks, code search, git inspection, and running tests.
+- Execute requested work immediately using your tools (`create_document`, `write_file`, `edit_file`, `run_shell_command`, `search_code`, etc.). When asked to create a PDF, DOCX, or file, generate it directly on disk with `create_document` or `write_file` — do NOT read the entire document contents aloud.
+- Keep spoken responses crisp and brief (1-2 sentences): confirm what was created or changed and where it was saved, instead of reading long text, file paths, raw JSON, or terminal logs aloud unless asked.
+- You have asynchronous NON_BLOCKING tools for Windows desktop control, document/file management, PowerShell commands, reminders/memory, webhooks, code search, git inspection, and running tests.
 - When the user mentions an outstanding task, follow-up, or reminder, save it proactively with `manage_reminders(action="add", ...)` so it stays synced across sessions.
 - When the user shares a preference or recurring detail worth keeping, proactively save it with `remember_fact`.
 - When a tool returns `status: "needs_confirmation"`, ask the user clearly for confirmation before re-invoking it with `confirmed=true` or `overwrite=true`.
@@ -79,10 +80,18 @@ class JarvisLiveSession:
 
     def build_system_instruction(self) -> str:
         """Combine base persona with persisted memory facts and open reminders."""
+        from pathlib import Path
+
+        home = Path.home()
         memory_context = self.memory.build_context_summary()
         parts = [
             _BASE_SYSTEM_INSTRUCTION.strip(),
-            f"Current workspace directory: {self.config.workspace_dir}",
+            (
+                f"Current workspace directory: {self.config.workspace_dir}\n"
+                f"User Downloads folder: {home / 'Downloads'}\n"
+                f"User Desktop folder: {home / 'Desktop'}\n"
+                f"User Documents folder: {home / 'Documents'}"
+            ),
         ]
         if self.config.webhooks:
             parts.append(f"Configured webhook aliases: {', '.join(sorted(self.config.webhooks))}")
