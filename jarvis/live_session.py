@@ -187,6 +187,7 @@ class JarvisLiveSession:
         idle_timeout_sec: float | None = None,
         initial_prompt: str | None = None,
         outbound_text_queue: asyncio.Queue[str] | None = None,
+        wake_greeting: bool = False,
     ) -> str:
         """Run one bidirectional audio session until idle timeout, GoAway, or cancellation."""
         live_config = self.build_live_config(text_only=False)
@@ -208,6 +209,13 @@ class JarvisLiveSession:
                 self.memory.log_message("user", initial_prompt, source="desktop")
                 await self._emit({"type": "transcript", "role": "user", "text": initial_prompt, "final": True})
                 await session.send_realtime_input(text=initial_prompt)
+            elif wake_greeting:
+                await session.send_realtime_input(
+                    text=(
+                        "[Sistema: El usuario acaba de activarte con 'Hey Jarvis'. "
+                        "Responde brevemente diciendo 'Hola, ¿cómo te ayudo?' y quédate escuchando.]"
+                    )
+                )
 
             async def _send_mic_loop() -> None:
                 nonlocal last_activity

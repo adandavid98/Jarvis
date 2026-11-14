@@ -319,6 +319,7 @@ class JarvisBridge:
                                 mic_queue=mic_queue,
                                 idle_timeout_sec=self.config.idle_timeout_sec,
                                 outbound_text_queue=self._outbound_text_queue,
+                                wake_greeting=True,
                             )
                             break
 
@@ -353,6 +354,7 @@ class JarvisBridge:
                                 mic_queue=mic_queue,
                                 idle_timeout_sec=self.config.idle_timeout_sec,
                                 outbound_text_queue=self._outbound_text_queue,
+                                wake_greeting=True,
                             )
                             break
             else:

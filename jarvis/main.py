@@ -86,6 +86,7 @@ async def run_wakeword_loop(
                 audio_out=audio_out,
                 mic_queue=mic_queue,
                 idle_timeout_sec=config.idle_timeout_sec,
+                wake_greeting=True,
             )
             print(f"[wake] Session ended ({reason}). Returning to local wake word listening.")
             detector.reset()
