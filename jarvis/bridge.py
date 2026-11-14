@@ -14,7 +14,7 @@ from typing import Any
 import psutil
 from websockets.asyncio.server import ServerConnection, serve
 
-from jarvis.audio import AudioInputStream, AudioOutputStream
+from jarvis.audio import AudioInputStream, AudioOutputStream, list_input_devices
 from jarvis.config import JarvisConfig
 from jarvis.live_session import JarvisLiveSession
 from jarvis.memory import JarvisMemory
@@ -48,6 +48,8 @@ class JarvisBridge:
         self._telemetry_paused: bool = False
         self._active_task: dict[str, Any] | None = None
         self._pending_task_prompt: str = ""
+        self._audio_in: AudioInputStream | None = None
+        self._voice_mode: str = "wakeword"
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
         if not self._clients:
@@ -247,6 +249,7 @@ class JarvisBridge:
         }
 
     async def _run_voice_loop(self, mode: str) -> None:
+        self._voice_mode = mode
         use_wakeword = mode == "wakeword"
         audio_in = AudioInputStream(
             sample_rate=self.config.input_sample_rate,
@@ -262,6 +265,7 @@ class JarvisBridge:
         try:
             mic_queue = audio_in.start(loop)
             audio_out.start()
+            self._audio_in = audio_in
         except Exception as exc:
             await self._broadcast({"type": "error", "message": f"Audio device error ({type(exc).__name__}: {exc})"})
             audio_in.stop()
@@ -367,6 +371,7 @@ class JarvisBridge:
         except Exception as exc:
             await self._broadcast({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         finally:
+            self._audio_in = None
             self._outbound_text_queue = None
             self._wake_event = None
             audio_in.stop()
@@ -558,6 +563,19 @@ class JarvisBridge:
                 await self._broadcast(self.build_memory_snapshot())
         elif action == "refresh_memory":
             await self._broadcast(self.build_memory_snapshot())
+        elif action == "set_input_device":
+            device = str(data.get("device", "")).strip()
+            self.config.save_input_device(device)
+            await self._broadcast(
+                {
+                    "type": "input_devices",
+                    "devices": list_input_devices(),
+                    "selected": self.config.input_device,
+                }
+            )
+            if self._voice_task and not self._voice_task.done() and self.config.gemini_api_key:
+                await self._stop_voice()
+                self._voice_task = asyncio.create_task(self._run_voice_loop(self._voice_mode))
         elif action == "set_telemetry_paused":
             paused = bool(data.get("paused", False))
             was_paused = self._telemetry_paused
@@ -570,6 +588,15 @@ class JarvisBridge:
         try:
             await ws.send(json.dumps({"type": "state", "state": self._state}))
             await ws.send(json.dumps({"type": "needs_api_key", "missing": not bool(self.config.gemini_api_key)}))
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "input_devices",
+                        "devices": list_input_devices(),
+                        "selected": self.config.input_device,
+                    }
+                )
+            )
             await ws.send(json.dumps(self.build_telemetry(), default=str))
             await ws.send(json.dumps(self.build_memory_snapshot(), default=str))
             async for message in ws:
@@ -585,9 +612,21 @@ class JarvisBridge:
                 continue
             await self._broadcast(self.build_telemetry())
 
+    async def _mic_level_loop(self) -> None:
+        last_sent = -1
+        while True:
+            await asyncio.sleep(0.15)
+            if self._telemetry_paused or not self._clients:
+                continue
+            level = self._audio_in.level_percent if self._audio_in is not None else 0
+            if level != last_sent:
+                last_sent = level
+                await self._broadcast({"type": "mic_level", "level": level})
+
     async def run(self, auto_start_voice: bool = False) -> None:
         """Start the local WebSocket bridge server."""
         telemetry_task = asyncio.create_task(self._telemetry_loop())
+        mic_level_task = asyncio.create_task(self._mic_level_loop())
         if auto_start_voice and self.config.gemini_api_key:
             self._voice_task = asyncio.create_task(self._run_voice_loop("wakeword"))
         try:
@@ -596,6 +635,7 @@ class JarvisBridge:
                 await asyncio.Future()
         finally:
             telemetry_task.cancel()
+            mic_level_task.cancel()
             await self._stop_voice()
 
 

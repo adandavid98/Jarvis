@@ -368,9 +368,10 @@ class JarvisLiveSession:
             recv_task = asyncio.create_task(_receive_loop())
             idle_task = asyncio.create_task(_idle_watchdog())
             standby_task = asyncio.create_task(_standby_watchdog())
-            text_task = asyncio.create_task(_send_text_loop())
 
-            tasks = [send_task, recv_task, standby_task, text_task]
+            tasks: list[asyncio.Task[Any]] = [send_task, recv_task, standby_task]
+            if outbound_text_queue is not None:
+                tasks.append(asyncio.create_task(_send_text_loop()))
             if idle_timeout_sec and idle_timeout_sec > 0:
                 tasks.append(idle_task)
             else:

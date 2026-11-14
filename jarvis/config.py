@@ -98,24 +98,37 @@ class JarvisConfig:
             return self.data_dir / ".env"
         return Path.cwd() / ".env"
 
-    def save_api_key(self, api_key: str) -> Path:
-        """Persist `GEMINI_API_KEY` to the active `.env` file and update config in-memory."""
-        cleaned = api_key.strip()
+    def _save_env_var(self, key: str, value: str) -> Path:
+        """Persist a key=value pair to the active `.env` file."""
         target = self.env_file_path
         target.parent.mkdir(parents=True, exist_ok=True)
         lines = target.read_text(encoding="utf-8").splitlines() if target.exists() else []
         updated = False
         new_lines: list[str] = []
+        prefix = f"{key}="
         for line in lines:
-            if line.strip().startswith("GEMINI_API_KEY="):
-                new_lines.append(f"GEMINI_API_KEY={cleaned}")
+            if line.strip().startswith(prefix):
+                new_lines.append(f"{key}={value}")
                 updated = True
             else:
                 new_lines.append(line)
         if not updated:
-            new_lines.append(f"GEMINI_API_KEY={cleaned}")
+            new_lines.append(f"{key}={value}")
         target.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        return target
+
+    def save_api_key(self, api_key: str) -> Path:
+        """Persist `GEMINI_API_KEY` to the active `.env` file and update config in-memory."""
+        cleaned = api_key.strip()
+        target = self._save_env_var("GEMINI_API_KEY", cleaned)
         self.gemini_api_key = cleaned
+        return target
+
+    def save_input_device(self, device: str) -> Path:
+        """Persist `JARVIS_INPUT_DEVICE` to the active `.env` file and update config in-memory."""
+        cleaned = device.strip()
+        target = self._save_env_var("JARVIS_INPUT_DEVICE", cleaned)
+        self.input_device = cleaned
         return target
 
     def validate_for_live(self) -> None:

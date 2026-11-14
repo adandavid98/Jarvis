@@ -26,6 +26,8 @@ const reminderInput = document.getElementById('reminder-input');
 const keyModal = document.getElementById('key-modal');
 const keyForm = document.getElementById('key-form');
 const apiKeyInput = document.getElementById('api-key-input');
+const micSelect = document.getElementById('mic-select');
+const micBar = document.getElementById('mic-bar');
 
 document.getElementById('btn-min').onclick = () => window.jarvisDesktop.minimize();
 document.getElementById('btn-max').onclick = () => window.jarvisDesktop.maximize();
@@ -265,6 +267,12 @@ document.getElementById('btn-direct').onclick = () =>
 document.getElementById('btn-stop').onclick = () =>
   sendCmd({ action: 'stop_voice' });
 
+if (micSelect) {
+  micSelect.addEventListener('change', () => {
+    sendCmd({ action: 'set_input_device', device: micSelect.value });
+  });
+}
+
 chatForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const text = chatInput.value.trim();
@@ -421,6 +429,22 @@ function connectBridge() {
     } else if (data.type === 'api_key_saved') {
       keyModal.classList.add('hidden');
       if (stateLabel.textContent === 'NEEDS KEY') setState('stopped');
+    } else if (data.type === 'input_devices') {
+      if (micSelect && Array.isArray(data.devices)) {
+        const selected = String(data.selected ?? '');
+        micSelect.innerHTML = '<option value="">Default Windows Mic</option>';
+        for (const d of data.devices) {
+          const opt = document.createElement('option');
+          opt.value = String(d.index);
+          const apiLabel = d.hostapi ? ` [${d.hostapi}]` : '';
+          const defLabel = d.is_default ? ' ★' : '';
+          opt.textContent = `${d.name}${apiLabel}${defLabel}`;
+          micSelect.appendChild(opt);
+        }
+        micSelect.value = selected;
+      }
+    } else if (data.type === 'mic_level') {
+      if (micBar) micBar.style.width = `${Math.max(0, Math.min(100, Number(data.level || 0)))}%`;
     } else if (data.type === 'telemetry') {
       document.getElementById('cpu-val').textContent = `${data.cpu_percent}%`;
       document.getElementById('cpu-bar').style.width = `${Math.min(100, data.cpu_percent)}%`;

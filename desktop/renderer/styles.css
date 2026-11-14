@@ -290,7 +290,44 @@ body {
   display: flex;
   justify-content: center;
   gap: 8px;
+  margin-bottom: 8px;
+}
+
+.mic-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin-bottom: 10px;
+  padding: 0 6px;
+}
+
+#mic-select {
+  flex: 1;
+  min-width: 0;
+  background: rgba(0, 28, 36, 0.75);
+  color: var(--cyan);
+  border: 1px solid var(--cyan-dim);
+  border-radius: 5px;
+  padding: 4px 8px;
+  font-size: 11px;
+  outline: none;
+}
+
+.mic-meter {
+  width: 110px;
+  height: 7px;
+  background: rgba(0, 40, 48, 0.7);
+  border: 1px solid var(--cyan-dim);
+  border-radius: 999px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.mic-meter-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #00ffcc, #52ff9b);
+  transition: width 0.1s linear;
 }
 
 .ctrl-btn {

@@ -11,6 +11,32 @@ import numpy as np
 import sounddevice as sd
 
 
+def list_input_devices() -> list[dict[str, Any]]:
+    """Return available audio input devices with host API labels."""
+    devices: list[dict[str, Any]] = []
+    try:
+        default_in = sd.default.device[0] if isinstance(sd.default.device, (list, tuple)) else sd.default.device
+        for idx, info in enumerate(sd.query_devices()):
+            if int(info.get("max_input_channels", 0)) <= 0:
+                continue
+            hostapi_name = ""
+            try:
+                hostapi_name = str(sd.query_hostapis(int(info["hostapi"]))["name"])
+            except Exception:
+                pass
+            devices.append(
+                {
+                    "index": idx,
+                    "name": str(info.get("name", f"Device {idx}")),
+                    "hostapi": hostapi_name,
+                    "is_default": idx == default_in,
+                }
+            )
+    except Exception:
+        pass
+    return devices
+
+
 class AudioInputStream:
     """Captures 16 kHz mono int16 PCM frames and pushes them to an asyncio queue."""
 
@@ -66,6 +92,14 @@ class AudioInputStream:
         if len(chunk) > 0:
             self.last_peak = int(np.max(np.abs(chunk)))
         self._loop.call_soon_threadsafe(self._enqueue_nonblocking, chunk)
+
+    @property
+    def level_percent(self) -> int:
+        """Return a 0-100 visual microphone level scaled for human speech."""
+        if self.last_peak <= 0:
+            return 0
+        # 8000 peak (~25% full scale) maps to 100% for clear speech visibility
+        return min(100, max(1, int(round((self.last_peak / 8000.0) * 100))))
 
     def _enqueue_nonblocking(self, chunk: np.ndarray) -> None:
         if self._queue is None:
