@@ -225,9 +225,13 @@ class AudioInputStream:
         self.max_queue_frames = max_queue_frames
         self.device = device
         self.last_peak: int = 0
+        self._last_voice_level: int = 0
         self._capture_sample_rate: int = sample_rate
-        self._noise_rms: float = 45.0
-        self._agc_gain: float = 3.0
+        self._capture_channels: int = channels
+        self._prev_sample: float = 0.0
+        self._noise_rms: float = 120.0
+        self._env_gain: float = 1.0
+        self._hangover: int = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._queue: asyncio.Queue[np.ndarray] | None = None
         self._stream: sd.InputStream | None = None
@@ -248,37 +252,57 @@ class AudioInputStream:
         return None
 
     def _preprocess_and_agc(self, raw_chunk: np.ndarray) -> np.ndarray:
-        """Remove sub-100Hz fan/power hum and apply adaptive software AGC for laptop mics."""
+        """Block <300Hz fan/chassis noise, decimate to 16kHz, and apply soft-knee voice gate with hangover."""
         if len(raw_chunk) < 4:
             return raw_chunk.astype(np.int16)
 
-        sig = raw_chunk.astype(np.float32)
-        sig -= float(np.mean(sig))
+        raw = raw_chunk.astype(np.float32)
+        raw -= float(np.mean(raw))
 
-        # Fast FFT band-pass (100 Hz - 7600 Hz) to strip laptop fan rumble and DC drift
-        freqs = np.fft.rfftfreq(len(sig), d=1.0 / self.sample_rate)
-        spec = np.fft.rfft(sig)
-        mask = np.clip((freqs - 85.0) / 45.0, 0.0, 1.0) * np.clip((7700.0 - freqs) / 300.0, 0.0, 1.0)
-        filtered = np.fft.irfft(spec * mask, n=len(sig))
+        pre_scale = 2.5 if self._capture_sample_rate > 24000 else 3.8
+        hp = np.empty_like(raw)
+        hp[0] = (raw[0] - 0.94 * self._prev_sample) * pre_scale
+        hp[1:] = (raw[1:] - 0.94 * raw[:-1]) * pre_scale
+        self._prev_sample = float(raw[-1])
 
-        frame_rms = float(np.sqrt(np.mean(filtered**2)))
-        frame_peak = float(np.max(np.abs(filtered)))
+        if self._capture_sample_rate == self.sample_rate * 3 and len(hp) >= 3:
+            trim = (len(hp) // 3) * 3
+            sig16 = (hp[0:trim - 2:3] + hp[1:trim - 1:3] + hp[2:trim:3]) / 3.0
+        elif self._capture_sample_rate != self.sample_rate and len(hp) > 1:
+            target_len = max(1, int(round(len(hp) * self.sample_rate / self._capture_sample_rate)))
+            x_old = np.linspace(0.0, 1.0, num=len(hp), endpoint=False)
+            x_new = np.linspace(0.0, 1.0, num=target_len, endpoint=False)
+            sig16 = np.interp(x_new, x_old, hp).astype(np.float32)
+        else:
+            sig16 = hp
 
-        if frame_rms < self._noise_rms * 1.35:
-            self._noise_rms = float(np.clip(0.92 * self._noise_rms + 0.08 * frame_rms, 12.0, 220.0))
+        f_rms = float(np.sqrt(np.mean(sig16**2)))
+        f_pk = float(np.max(np.abs(sig16)))
 
-        speech_gate = max(110.0, self._noise_rms * 1.9)
-        if frame_peak > speech_gate:
-            desired_gain = float(np.clip(11500.0 / max(1.0, frame_peak), 1.0, 12.0))
-            self._agc_gain = 0.40 * self._agc_gain + 0.60 * desired_gain
-            boosted = np.clip(filtered * self._agc_gain, -32768.0, 32767.0).astype(np.int16)
-            self.last_peak = int(np.max(np.abs(boosted)))
-            return boosted
+        if f_rms < self._noise_rms * 1.30 or (self._hangover == 0 and f_rms < self._noise_rms * 1.50):
+            self._noise_rms = 0.88 * self._noise_rms + 0.12 * f_rms
+        self._noise_rms = float(np.clip(self._noise_rms, 15.0, 450.0))
 
-        self._agc_gain = max(1.5, self._agc_gain * 0.92)
-        quiet = np.clip(filtered * 1.5, -32768.0, 32767.0).astype(np.int16)
-        self.last_peak = int(min(400, frame_peak))
-        return quiet
+        is_voice = (f_rms > max(55.0, self._noise_rms * 1.38)) or (f_pk > max(240.0, self._noise_rms * 5.8))
+        if is_voice:
+            self._hangover = 8
+            target_gain = float(np.clip(9000.0 / max(100.0, f_pk), 1.2, 10.0))
+            self._env_gain = 0.35 * self._env_gain + 0.65 * target_gain
+            excess = max(0.0, f_rms - self._noise_rms * 1.30)
+            self._last_voice_level = min(
+                100,
+                max(10, int(round((excess / max(40.0, self._noise_rms * 1.8)) * 100))),
+            )
+        elif self._hangover > 0:
+            self._hangover -= 1
+            self._last_voice_level = max(0, int(self._last_voice_level * 0.65))
+        else:
+            self._env_gain = max(0.15, self._env_gain * 0.70)
+            self._last_voice_level = 0
+
+        out16 = np.clip(sig16 * self._env_gain, -32768.0, 32767.0).astype(np.int16)
+        self.last_peak = int(np.max(np.abs(out16))) if (is_voice or self._hangover > 0) else 0
+        return out16
 
     def _callback(
         self,
@@ -290,28 +314,20 @@ class AudioInputStream:
         if self._loop is None or self._queue is None:
             return
         if indata.ndim > 1 and indata.shape[1] > 1:
-            # Pick the channel with strongest signal energy (handles asymmetric laptop mic arrays)
-            ch_peaks = [int(np.max(np.abs(indata[:, c]))) for c in range(indata.shape[1])]
-            best_ch = int(np.argmax(ch_peaks))
+            # Pick the capsule with strongest AC standard deviation (ignores dead Ch 0 on laptop mic arrays)
+            stds = [float(np.std(indata[:, c].astype(np.float32))) for c in range(indata.shape[1])]
+            best_ch = int(np.argmax(stds))
             chunk = indata[:, best_ch].copy()
         else:
             chunk = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
-
-        if self._capture_sample_rate != self.sample_rate and len(chunk) > 1:
-            target_len = max(1, int(round(len(chunk) * self.sample_rate / self._capture_sample_rate)))
-            x_old = np.linspace(0.0, 1.0, num=len(chunk), endpoint=False)
-            x_new = np.linspace(0.0, 1.0, num=target_len, endpoint=False)
-            chunk = np.interp(x_new, x_old, chunk.astype(np.float32)).astype(np.int16)
 
         processed = self._preprocess_and_agc(chunk)
         self._loop.call_soon_threadsafe(self._enqueue_nonblocking, processed)
 
     @property
     def level_percent(self) -> int:
-        """Return a 0-100 visual microphone level scaled for human speech."""
-        if self.last_peak <= 80:
-            return 0
-        return min(100, max(1, int(round((self.last_peak / 9000.0) * 100))))
+        """Return a 0-100 visual microphone level that responds only to human voice above ambient noise."""
+        return self._last_voice_level
 
     def _enqueue_nonblocking(self, chunk: np.ndarray) -> None:
         if self._queue is None:
@@ -331,11 +347,41 @@ class AudioInputStream:
         get_windows_default_endpoints(ensure_mic_unmuted=True)
         dev_idx = self._resolve_device(self.device)
         wasapi_idx = get_wasapi_default_device("input") if dev_idx is None else dev_idx
+        self._prev_sample = 0.0
+        self._noise_rms = 120.0
+        self._env_gain = 1.0
+        self._hangover = 0
+        self._last_voice_level = 0
 
-        # 1. Try Windows WASAPI default input with auto_convert=True (native kernel 16kHz conversion)
+        # 1. Try Windows WASAPI Exclusive mode at native sample rate & channels
+        #    (Bypasses broken Realtek Shared-Mode FxProperties APO on laptop mic arrays)
+        if wasapi_idx is not None and hasattr(sd, "WasapiSettings"):
+            try:
+                info = sd.query_devices(wasapi_idx, kind="input")
+                native_sr = int(round(float(info.get("default_samplerate", 48000)))) or 48000
+                max_ch = max(1, min(2, int(info.get("max_input_channels", 1))))
+                scaled_block = max(256, int(round(self.blocksize * native_sr / self.sample_rate)))
+                self._capture_sample_rate = native_sr
+                self._capture_channels = max_ch
+                stream = sd.InputStream(
+                    samplerate=native_sr,
+                    channels=max_ch,
+                    dtype="int16",
+                    blocksize=scaled_block,
+                    device=wasapi_idx,
+                    extra_settings=sd.WasapiSettings(exclusive=True),
+                    callback=self._callback,
+                )
+                stream.start()
+                return stream
+            except Exception:
+                pass
+
+        # 2. Try Windows WASAPI Shared mode with auto_convert=True at 16kHz
         if wasapi_idx is not None and hasattr(sd, "WasapiSettings"):
             try:
                 self._capture_sample_rate = self.sample_rate
+                self._capture_channels = self.channels
                 stream = sd.InputStream(
                     samplerate=self.sample_rate,
                     channels=self.channels,
@@ -350,9 +396,10 @@ class AudioInputStream:
             except Exception:
                 pass
 
-        # 2. Try standard MME / default input at 16 kHz
+        # 3. Try standard MME / default input at 16 kHz or native sample rate
         try:
             self._capture_sample_rate = self.sample_rate
+            self._capture_channels = self.channels
             stream = sd.InputStream(
                 samplerate=self.sample_rate,
                 channels=self.channels,
@@ -370,10 +417,9 @@ class AudioInputStream:
             except Exception:
                 target = None
                 info = sd.query_devices(None, kind="input")
-            native_sr = int(round(float(info.get("default_samplerate", 44100))))
-            if native_sr <= 0:
-                native_sr = 44100
+            native_sr = int(round(float(info.get("default_samplerate", 44100)))) or 44100
             self._capture_sample_rate = native_sr
+            self._capture_channels = self.channels
             scaled_block = max(256, int(round(self.blocksize * native_sr / self.sample_rate)))
             stream = sd.InputStream(
                 samplerate=native_sr,

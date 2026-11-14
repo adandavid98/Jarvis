@@ -1,30 +1,26 @@
-# Plan de Diagnóstico y Solución: Micrófono Nativo de Windows y Conmutación Automática (Con/Sin Audífonos)
+# Plan de Diagnóstico y Solución: Micrófono Nativo de Windows y Bloqueador de Ruido Exterior (`v0.1.9`)
 
 ## 1. Diagnóstico y Pruebas Realizadas en esta Laptop
 
-Se ejecutaron pruebas acústicas, de espectro (FFT), de niveles CoreAudio COM (`IMMDeviceEnumerator` / `IAudioEndpointVolume` / `IDeviceTopology`), de `openWakeWord` y de `Gemini Live` en la laptop actual (`Lenovo / Realtek(R) Audio ALC257 con Intel SST`):
+Se ejecutaron pruebas acústicas con reproducción real por bocinas (`test_hj.wav` con `"Hey Jarvis"` y tonos de 1 kHz), análisis FFT por canal y capturas comparativas entre **MME**, **DirectSound**, **WASAPI Shared** y **WASAPI Exclusive** en la laptop (`Lenovo / Realtek(R) Audio ALC257 con Intel SST`):
 
 | Prueba Realizada | Resultado Observado | Causa Raíz Identificada |
 | :--- | :--- | :--- |
-| **1. Inspección de `.env` en `%APPDATA%\jarvis-desktop\.env`** | Contenía `JARVIS_INPUT_DEVICE=9` fijado por el selector del HUD. | Al conectar/desconectar audífonos (`ADAN's Buds3`, `Beats Studio Pro`), los índices de PortAudio cambian y el índice fijo deja de coincidir con el micrófono activo. |
-| **2. Volumen Nativo en Windows CoreAudio (`IAudioEndpointVolume`)** | El endpoint `Microphone Array (Realtek(R) Audio)` estaba en **`47.2% (-0.2 dB)`** (rango `-17 dB` a `+20 dB`). | En `-0.2 dB`, el arreglo digital MEMS entregaba `peak = 14`, `rms = 1.99` (casi silencio total). Al subirlo a **`100% (+20.0 dB)`** con `+10 dB` de amplificación de hardware, la señal subió **35x–68x** (`peak = 475–1024`, `rms = 68–78`). |
-| **3. Prueba WASAPI `16 kHz / 24 kHz Mono`** | `sd.InputStream(samplerate=16000, channels=1, device=9)` fallaba con `PortAudioError` sin `WasapiSettings`. | Windows WASAPI requiere `sd.WasapiSettings(auto_convert=True)` (`AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`) para convertir automáticamente la frecuencia nativa (`48 kHz` estéreo) a `16 kHz` mono en el kernel de audio de Windows. |
-| **4. Espectro FFT y Atenuación por Distancia (Sin Audífonos)** | Sin audífonos (a 50–70 cm de la pantalla), hay ruido sub-grave de ventilador/red (`9–67 Hz`) y la voz llega con picos de `500–1,800` (vs `12,000+` con audífonos a 2 cm). | Se requiere un **Filtro Pasa-Altos (>100 Hz)** para eliminar el retumbo grave y **Control Automático de Ganancia (Software AGC)** para amplificar la voz de laptop hasta `~12,000` sin saturar. |
-| **5. Prueba de `"Hey Jarvis"` con pronunciación en Español (`es-MX`)** | Con voz en español (`Microsoft Sabina Desktop`), `"Hey Jarvis"` obtuvo `score = 0.2876` y `"Ey Jarvis"` obtuvo `0.1891` (mientras el silencio da `0.0002–0.0043`). | El umbral por defecto `wake_threshold = 0.50` bloqueaba la activación al hablar con acento en español o desde el micrófono de la laptop. Bajando el umbral a **`0.18`** (con AGC activo), `"Hey Jarvis"` se activa de inmediato sin falsos positivos. |
-| **6. Cambio en caliente (Hot-Plug) Con/Sin Audífonos** | Al desconectar los audífonos mientras Jarvis ya estaba corriendo, el stream de PortAudio permanecía atado al dispositivo anterior. | Se requiere un monitor automático de cambios del dispositivo predeterminado de Windows que recargue PortAudio y reconecte el stream de entrada y salida en caliente. |
+| **1. Comparativa MME / DirectSound / WASAPI Shared vs Exclusive** | En `WASAPI Shared` (`Dev 9`, `16 kHz` o `48 kHz`), tras los primeros `0.3s` de ruido inicial (`rms = 62–128` que movía `#mic-bar`), la señal cae a `rms = 2.2–9.5` y `openWakeWord` marca **`0.0006–0.0071`** (no despierta). | El APO propietario de Realtek (`FxProperties` en modo compartido de Windows) suprime y distorsiona la voz ambiental a distancia y el canal `Ch 0` del arreglo MEMS no responde acústicamente. En cambio, **WASAPI Exclusive (`device=9`, `48 kHz`, `2 ch`)** lee la cápsula física viva `Ch 1` sin pérdida (`peak = 7,565`). |
+| **2. Continuidad de Fase y Pre-énfasis Compensado por Frecuencia** | El filtrado FFT por bloques de 80 ms introducía discontinuidades de fase y cortaba consonantes finales (`"-vis"`), bajando el score a `0.006`. Con filtro pasa-altos continuo de 1er orden (`pre_scale = 2.5` a `48 kHz`, `3.8` a `16 kHz`) + diezmado anti-aliasing 3-tap (`48 kHz -> 16 kHz`), `openWakeWord` alcanzó **`0.9939` (`99.4%`)**. | Mantener estado continuo (`self._prev_sample`) y diezmar con promedio de 3 muestras preserva la envolvente temporal y armónicos de la voz humana mientras atenúa ventilador/zumbido `< 300 Hz`. |
+| **3. Bloqueador de Ruido Exterior con Hangover de Voz (`640 ms`)** | El AGC anterior fijaba umbral bajo (`110`), confundiendo el ruido de sala con voz y manteniendo el indicador `#mic-bar` en `15%–27%` continuamente. | Con umbral adaptativo de piso de ruido (`self._noise_rms`) + **8 frames de hangover (`640 ms`)**, el medidor `#mic-bar` queda en **`0%` durante el silencio/ruido de fondo** y solo se abre al detectar voz humana real, conservando las consonantes finales para Gemini Live y `openWakeWord`. |
+| **4. Volumen Nativo CoreAudio (`IAudioEndpointVolume`) & Fallback** | El endpoint predeterminado de Windows puede estar en `< 90%` o muteado. Además, si otra app (como WhatsApp) retiene el micrófono en uso exclusivo, debe existir respaldo automático. | `get_windows_default_endpoints(ensure_mic_unmuted=True)` garantiza `unmute` y volumen `100%` (+20 dB). Si WASAPI Exclusive lanza error por contención con otra app, `AudioInputStream` cae suavemente a `WASAPI Shared (auto_convert=True)` y luego `MME`. |
 
 ---
 
-## 2. Plan de Implementación
+## 2. Cambios Implementados en `v0.1.9`
 
-1. **Eliminar el Selector de Micrófonos del HUD (`desktop/renderer/index.html`, `app.js`, `styles.css`)**:
-   - Retirar `<select id="mic-select">` y `<button id="btn-refresh-mic">`, dejando únicamente el medidor visual en vivo (`MIC LEVEL` + `#mic-bar`).
-   - Limpiar `JARVIS_INPUT_DEVICE` de `%APPDATA%\jarvis-desktop\.env`.
-2. **Auto-Unmute, Boost 100%, `WasapiSettings(auto_convert=True)`, Filtro Pasa-Altos y Software AGC (`jarvis/audio.py`)**:
-   - Asegurar que el micrófono activo de Windows no esté muteado y tenga volumen `100%` en CoreAudio.
-   - Usar `sd.WasapiSettings(auto_convert=True)` para capturar a `16 kHz` y reproducir a `24 kHz` en los dispositivos predeterminados de Windows WASAPI.
-   - Aplicar filtro pasa-altos (>100 Hz) y ganancia adaptativa (AGC) para voz a distancia en laptop.
-   - Soportar `hot-swap` automático cuando Windows cambie de micrófono o altavoz (al conectar o desconectar audífonos).
-3. **Detección Sensible de `"Hey Jarvis"` (`jarvis/wake_word.py`, `jarvis/config.py`, `jarvis/bridge.py`)**:
-   - Ajustar `wake_threshold` a `0.18` y evaluar frames con ganancia normalizada en `WakeWordDetector`.
-   - Ejecutar watchdog de dispositivos de audio cada `2.0s` en `JarvisBridge`.
+1. **Captura Prioritaria en WASAPI Exclusive Nativo + Selección de Cápsula Viva (`jarvis/audio.py`)**:
+   - `_open_portaudio_stream()` intenta primero **WASAPI Exclusive** a la frecuencia nativa (`48 kHz`, `2 canales`), pasando luego a **WASAPI Shared (`auto_convert=True`)** (para audífonos/Bluetooth o cuando otra app usa el micrófono) y por último **MME**.
+   - En arreglos multi-canal, `_callback()` selecciona el canal con mayor desviación estándar AC (`np.std`), ignorando cápsulas muertas como `Ch 0` en Realtek ALC257.
+2. **Bloqueador de Ruido Exterior + AGC Adaptativo con Hangover (`jarvis/audio.py`)**:
+   - Filtro continuo pre-énfasis pasa-altos (`< 300 Hz`) con compensación de ganancia por frecuencia de muestreo (`2.5` para `> 24 kHz`, `3.8` para `<= 24 kHz`) y diezmado anti-aliasing `48 kHz -> 16 kHz`.
+   - Seguimiento adaptativo del piso de ruido (`_noise_rms`), compuerta enfocada en voz (`is_voice`), y ventana de retención de `8 frames (640 ms)` (`_hangover`) para no truncar palabras ni consonantes.
+   - `level_percent` ahora reporta `0%` en ruido ambiental de sala y responde únicamente ante voz humana.
+3. **Empaquetado y Sincronización (`desktop/package.json`, `data/SYNC.md`, `desktop/dist/Jarvis-Setup.exe`)**:
+   - Versión incrementada a **`0.1.9`**, reconstrucción de `jarvis-bridge.exe` + `Jarvis-Setup.exe`, actualización local y publicación en GitHub.
