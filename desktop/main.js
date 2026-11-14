@@ -365,42 +365,62 @@ function setupAutoUpdater() {
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
+  autoUpdater.on('update-available', (info) => {
+    if (!manualUpdateCheck) return;
+    dialog.showMessageBox({
+      type: 'info',
+      title: 'Actualización disponible',
+      message: `Descargando Jarvis v${info.version}...`,
+      detail: 'La aplicación se instalará y reiniciará automáticamente al terminar la descarga.',
+    });
+  });
+
   autoUpdater.on('update-not-available', () => {
     if (!manualUpdateCheck) return;
     manualUpdateCheck = false;
     dialog.showMessageBox({
       type: 'info',
-      title: 'Jarvis Updates',
-      message: `Jarvis v${app.getVersion()} is up to date.`,
+      title: 'Jarvis',
+      message: 'No hay actualización disponible.',
+      detail: `Jarvis v${app.getVersion()} ya está en la última versión.`,
     });
   });
 
   autoUpdater.on('update-downloaded', (info) => {
+    const wasManual = manualUpdateCheck;
     manualUpdateCheck = false;
-    dialog.showMessageBox({
-      type: 'info',
-      title: 'Jarvis Update Ready',
-      message: `Jarvis v${info.version} has been downloaded.`,
-      detail: 'Restart Jarvis now to apply the update, or it will install automatically when you quit.',
-      buttons: ['Restart & Update Now', 'Later'],
-      defaultId: 0,
-      cancelId: 1,
-    }).then(({ response }) => {
-      if (response === 0) {
+    if (wasManual) {
+      dialog.showMessageBox({
+        type: 'info',
+        title: 'Actualización lista',
+        message: `Jarvis v${info.version} descargada.`,
+        detail: 'Se instalará y reiniciará ahora.',
+        buttons: ['Reiniciar e instalar'],
+        defaultId: 0,
+      }).then(() => {
         isQuitting = true;
-        autoUpdater.quitAndInstall();
-      }
-    });
+        autoUpdater.quitAndInstall(false, true);
+      });
+    } else {
+      isQuitting = true;
+      autoUpdater.quitAndInstall(false, true);
+    }
   });
 
   autoUpdater.on('error', (err) => {
     if (!manualUpdateCheck) return;
     manualUpdateCheck = false;
+    const rawMsg = err?.message || String(err);
+    const isPrivateOrMissing = rawMsg.includes('404') || rawMsg.includes('releases.atom');
     dialog.showMessageBox({
       type: 'warning',
-      title: 'Jarvis Update Check Failed',
-      message: 'Could not check for updates right now.',
-      detail: err?.message || String(err),
+      title: 'No se pudo buscar actualizaciones',
+      message: isPrivateOrMissing
+        ? 'No hay acceso público a los releases de GitHub (404).'
+        : 'No se pudo verificar actualizaciones en este momento.',
+      detail: isPrivateOrMissing
+        ? 'El repositorio adandavid98/Jarvis es privado o aún no tiene un release público con latest.yml. Haz el repositorio público en GitHub para activar el auto-updater.'
+        : rawMsg.split('\n')[0].slice(0, 220),
     });
   });
 
