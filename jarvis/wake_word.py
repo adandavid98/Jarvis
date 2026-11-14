@@ -11,9 +11,9 @@ class WakeWordDetector:
     def __init__(
         self,
         model_name: str = "hey_jarvis",
-        threshold: float = 0.28,
+        threshold: float = 0.50,
         consecutive_frames: int = 2,
-        instant_threshold: float = 0.60,
+        instant_threshold: float = 0.78,
         min_voice_rms: float = 160.0,
     ) -> None:
         self.model_name = model_name

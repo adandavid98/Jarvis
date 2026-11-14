@@ -28,7 +28,7 @@ class JarvisConfig:
 
     # Wake word & session lifecycle
     wake_word_model: str = "hey_jarvis"
-    wake_threshold: float = 0.28
+    wake_threshold: float = 0.50
     wake_consecutive_frames: int = 2
     idle_timeout_sec: float = 15.0
 
@@ -86,7 +86,7 @@ class JarvisConfig:
             thinking_level=os.getenv("JARVIS_THINKING_LEVEL", "low").strip(),
             voice_name=os.getenv("JARVIS_VOICE_NAME", "Fenrir").strip(),
             wake_word_model=os.getenv("JARVIS_WAKE_WORD", "hey_jarvis").strip(),
-            wake_threshold=float(os.getenv("JARVIS_WAKE_THRESHOLD", "0.28")),
+            wake_threshold=float(os.getenv("JARVIS_WAKE_THRESHOLD", "0.50")),
             wake_consecutive_frames=max(1, int(os.getenv("JARVIS_WAKE_CONSECUTIVE_FRAMES", "2"))),
             idle_timeout_sec=float(os.getenv("JARVIS_IDLE_TIMEOUT_SEC", "15")),
             silence_duration_ms=int(os.getenv("JARVIS_SILENCE_DURATION_MS", "1100")),

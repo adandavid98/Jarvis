@@ -305,7 +305,7 @@ class JarvisLiveSession:
                     await session.send_realtime_input(text=text)
 
             async def _receive_loop() -> None:
-                nonlocal last_activity, interaction_status, turn_idle, end_reason
+                nonlocal last_activity, interaction_status, turn_idle, end_reason, recording_greeting
                 active_speaker: str | None = None
                 turn_buffers: dict[str, list[str]] = {"You": [], "Jarvis": []}
 

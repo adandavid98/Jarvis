@@ -404,6 +404,7 @@ class AudioInputStream:
         self._noise_rms: float = 95.0
         self._rms_history: collections.deque[float] = collections.deque(maxlen=40)
         self._env_gain: float = 1.0
+        self._wake_env_rms: float = 250.0
         self._hangover: int = 0
         self._peak_streak: int = 0
         self._pre_roll: collections.deque[np.ndarray] = collections.deque(maxlen=3)
@@ -460,7 +461,7 @@ class AudioInputStream:
         hp_flat = hp_vals.astype(np.float32)
 
         # Branch 2: Rate-compensated pre-emphasis for openWakeWord sibilant sensitivity
-        pre_scale = 2.5 if self._capture_sample_rate > 24000 else 3.8
+        pre_scale = 3.0 if self._capture_sample_rate > 24000 else 3.8
         pe = np.empty_like(raw)
         pe[0] = (raw[0] - 0.94 * self._prev_wake_sample) * pre_scale
         pe[1:] = (raw[1:] - 0.94 * raw[:-1]) * pre_scale
@@ -512,7 +513,12 @@ class AudioInputStream:
         # Adapt noise floor via rolling 20th-percentile (never locks on sustained room noise)
         if not barge_in_now:
             self._rms_history.append(f_rms)
-            if len(self._rms_history) >= 6:
+            if len(self._rms_history) == 6:
+                vals = list(self._rms_history)
+                if max(vals) <= max(120.0, min(vals) * 2.4):
+                    self._noise_rms = float(np.clip(float(np.median(vals)) * 1.05, 20.0, 1200.0))
+                    self._hangover = 0
+            elif len(self._rms_history) > 6:
                 floor_p20 = float(np.percentile(self._rms_history, 20))
                 if floor_p20 < self._noise_rms:
                     self._noise_rms = float(np.clip(0.75 * self._noise_rms + 0.25 * floor_p20, 20.0, 1200.0))
@@ -523,11 +529,7 @@ class AudioInputStream:
             elif self._hangover == 0 and f_rms < self._noise_rms * 1.25:
                 self._noise_rms = float(np.clip(0.85 * self._noise_rms + 0.15 * f_rms, 20.0, 1200.0))
 
-        is_sustained = (
-            barge_in_now
-            or (f_rms > max(70.0, self._noise_rms * 1.48))
-            or (w_rms > max(70.0, self._noise_rms * 1.50))
-        )
+        is_sustained = barge_in_now or (f_rms > max(70.0, self._noise_rms * 1.45))
         has_spike = (f_pk > max(260.0, self._noise_rms * 5.8)) or (w_pk > max(260.0, self._noise_rms * 5.8))
         if has_spike and not is_sustained:
             self._peak_streak += 1
@@ -568,8 +570,13 @@ class AudioInputStream:
                 ]
                 self._pre_roll.clear()
             voice_out = np.clip(hp_flat * self._env_gain, -32768.0, 32767.0).astype(np.int16)
-            w_gain = float(np.clip(9000.0 / max(100.0, w_pk), 1.2, 9.0)) if w_pk > 10.0 else 1.0
-            wake_out = np.clip(wake16 * w_gain, -32768.0, 32767.0).astype(np.int16)
+            # Slow prosody-preserving envelope for openWakeWord (boosts Hey Jarvis to ~0.99 without noise pumping)
+            if w_rms > self._wake_env_rms:
+                self._wake_env_rms = 0.85 * self._wake_env_rms + 0.15 * w_rms
+            else:
+                self._wake_env_rms = 0.96 * self._wake_env_rms + 0.04 * w_rms
+            w_slow_gain = float(np.clip(1800.0 / max(150.0, self._wake_env_rms), 1.0, 4.5))
+            wake_out = np.clip(wake16 * w_slow_gain, -32768.0, 32767.0).astype(np.int16)
             self.last_peak = int(np.max(np.abs(voice_out)))
         else:
             self._pre_roll.append(hp_flat)
@@ -649,6 +656,7 @@ class AudioInputStream:
         self._noise_rms = 95.0
         self._rms_history.clear()
         self._env_gain = 1.0
+        self._wake_env_rms = 250.0
         self._hangover = 0
         self._peak_streak = 0
         self._last_voice_level = 0

@@ -402,7 +402,7 @@ def test_audio_agc_and_wake_threshold() -> None:
     from jarvis.wake_word import WakeWordDetector
 
     cfg = JarvisConfig.from_env()
-    assert cfg.wake_threshold == 0.28
+    assert cfg.wake_threshold == 0.50
     assert cfg.wake_consecutive_frames == 2
     assert cfg.mute_mic_while_speaking is False
     assert cfg.silence_duration_ms == 1100
@@ -410,7 +410,7 @@ def test_audio_agc_and_wake_threshold() -> None:
     assert cfg.barge_in_enabled is True
 
     det = WakeWordDetector()
-    assert det.threshold == 0.28
+    assert det.threshold == 0.50
     assert det.consecutive_frames == 2
 
     stream = AudioInputStream(sample_rate=16000, channels=1, blocksize=1280)
@@ -640,6 +640,102 @@ def test_live_config_vad_and_quota_recovery(tmp_path: Path) -> None:
     assert any("audio" in c for c in sent_calls)
     assert any(c.get("audio_stream_end") is True for c in sent_calls)
     assert not any("text" in c for c in sent_calls)
+
+
+def test_wake_greeting_recording_without_cache(tmp_path: Path) -> None:
+    """Ensure first uncached wake greeting records audio without UnboundLocalError and saves PCM cache."""
+    import asyncio
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    import numpy as np
+    from jarvis.config import JarvisConfig
+    from jarvis.live_session import JarvisLiveSession
+    from jarvis.memory import JarvisMemory
+    from jarvis.tools import build_default_registry
+
+    cfg = JarvisConfig(
+        gemini_api_key="dummy-key",
+        db_path=tmp_path / "m2.db",
+        data_dir=tmp_path,
+    )
+    mem = JarvisMemory(cfg.db_path)
+    reg = build_default_registry(cfg, mem)
+    session = JarvisLiveSession(cfg, mem, reg)
+
+    greeting_bytes = b"\x10\x00" * 5000
+
+    class _FakeGeminiSession:
+        async def send_realtime_input(self, **kwargs: object) -> None:
+            pass
+
+        async def send_client_content(self, **kwargs: object) -> None:
+            pass
+
+        async def receive(self):
+            yield SimpleNamespace(
+                server_content=SimpleNamespace(
+                    interrupted=False,
+                    model_turn=SimpleNamespace(
+                        parts=[SimpleNamespace(inline_data=SimpleNamespace(data=greeting_bytes))]
+                    ),
+                    input_transcription=None,
+                    output_transcription=SimpleNamespace(text="Hola, ¿cómo te ayudo?"),
+                    turn_complete=True,
+                ),
+                tool_call=None,
+                go_away=None,
+                session_resumption_update=None,
+            )
+            await asyncio.sleep(0.05)
+            session.request_standby()
+            while True:
+                await asyncio.sleep(0.05)
+
+    class _FakeLive:
+        @asynccontextmanager
+        async def connect(self, **kwargs: object):
+            yield _FakeGeminiSession()
+
+    class _FakeAio:
+        def __init__(self) -> None:
+            self.live = _FakeLive()
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.aio = _FakeAio()
+
+    session._client = _FakeClient()  # type: ignore[assignment]
+
+    class _FakeAudioOut:
+        def __init__(self) -> None:
+            self.enqueued: list[bytes] = []
+            self.is_playing = False
+
+        def enqueue(self, pcm: bytes) -> None:
+            self.enqueued.append(pcm)
+
+        def clear(self) -> None:
+            pass
+
+    class _FakeAudioIn:
+        is_speech_active = False
+
+        def drain(self) -> None:
+            pass
+
+    reason = asyncio.run(
+        session.run_voice_session(
+            _FakeAudioIn(),  # type: ignore[arg-type]
+            _FakeAudioOut(),  # type: ignore[arg-type]
+            asyncio.Queue(),
+            idle_timeout_sec=5.0,
+            wake_greeting=True,
+        )
+    )
+    assert reason == "standby"
+    cache_path = tmp_path / "wake_greeting_24k.pcm"
+    assert cache_path.exists()
+    assert cache_path.read_bytes() == greeting_bytes
 
 
 
