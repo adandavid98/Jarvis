@@ -8,7 +8,7 @@ import numpy as np
 class WakeWordDetector:
     """Detects a wake word (default: 'hey_jarvis') on 16 kHz 1280-sample int16 frames."""
 
-    def __init__(self, model_name: str = "hey_jarvis", threshold: float = 0.5) -> None:
+    def __init__(self, model_name: str = "hey_jarvis", threshold: float = 0.18) -> None:
         self.model_name = model_name
         self.threshold = threshold
         self._model = None

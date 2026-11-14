@@ -396,4 +396,27 @@ def test_bridge_tasks_only_track_tool_actions(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_audio_agc_and_wake_threshold() -> None:
+    import numpy as np
+    from jarvis.audio import AudioInputStream
+    from jarvis.wake_word import WakeWordDetector
+
+    cfg = JarvisConfig.from_env()
+    assert cfg.wake_threshold == 0.18
+    det = WakeWordDetector()
+    assert det.threshold == 0.18
+
+    stream = AudioInputStream(sample_rate=16000, channels=1, blocksize=1280)
+    t = np.linspace(0.0, 0.08, 1280, endpoint=False)
+    # Simulate quiet 400Hz laptop speech (peak ~600) plus 30Hz fan rumble
+    quiet_speech = (600.0 * np.sin(2 * np.pi * 400 * t) + 300.0 * np.sin(2 * np.pi * 30 * t)).astype(np.int16)
+    boosted = stream._preprocess_and_agc(quiet_speech)
+    assert boosted.dtype == np.int16
+    assert len(boosted) == 1280
+    # AGC should amplify speech well above the raw 600 peak
+    assert int(np.max(np.abs(boosted))) > 2000
+    assert stream.level_percent >= 20
+
+
+
 

@@ -28,7 +28,7 @@ class JarvisConfig:
 
     # Wake word & session lifecycle
     wake_word_model: str = "hey_jarvis"
-    wake_threshold: float = 0.5
+    wake_threshold: float = 0.18
     idle_timeout_sec: float = 15.0
 
     # Storage & workspace
@@ -80,7 +80,7 @@ class JarvisConfig:
             thinking_level=os.getenv("JARVIS_THINKING_LEVEL", "low").strip(),
             voice_name=os.getenv("JARVIS_VOICE_NAME", "Fenrir").strip(),
             wake_word_model=os.getenv("JARVIS_WAKE_WORD", "hey_jarvis").strip(),
-            wake_threshold=float(os.getenv("JARVIS_WAKE_THRESHOLD", "0.5")),
+            wake_threshold=float(os.getenv("JARVIS_WAKE_THRESHOLD", "0.18")),
             idle_timeout_sec=float(os.getenv("JARVIS_IDLE_TIMEOUT_SEC", "15")),
             data_dir=data_dir,
             db_path=db_path,
@@ -88,7 +88,7 @@ class JarvisConfig:
             webhooks={str(k): str(v) for k, v in parsed_webhooks.items()},
             auto_approve_dangerous=os.getenv("JARVIS_AUTO_APPROVE_DANGEROUS", "false").lower() == "true",
             mute_mic_while_speaking=os.getenv("JARVIS_MUTE_WHILE_SPEAKING", "true").lower() == "true",
-            input_device=os.getenv("JARVIS_INPUT_DEVICE", "").strip(),
+            input_device="",
         )
 
     @property

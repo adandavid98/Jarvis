@@ -301,26 +301,21 @@ body {
   padding: 0 6px;
 }
 
-#mic-select {
-  flex: 1;
-  min-width: 0;
-  background: rgba(0, 28, 36, 0.75);
+.mic-label {
+  font-size: 10px;
+  letter-spacing: 1px;
   color: var(--cyan);
-  border: 1px solid var(--cyan-dim);
-  border-radius: 5px;
-  padding: 4px 8px;
-  font-size: 11px;
-  outline: none;
+  opacity: 0.8;
+  font-weight: bold;
 }
 
 .mic-meter {
-  width: 110px;
+  flex: 1;
   height: 7px;
   background: rgba(0, 40, 48, 0.7);
   border: 1px solid var(--cyan-dim);
   border-radius: 999px;
   overflow: hidden;
-  flex-shrink: 0;
 }
 
 .mic-meter-fill {

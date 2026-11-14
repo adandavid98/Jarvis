@@ -14,7 +14,13 @@ from typing import Any
 import psutil
 from websockets.asyncio.server import ServerConnection, serve
 
-from jarvis.audio import AudioInputStream, AudioOutputStream, list_input_devices, refresh_audio_devices
+from jarvis.audio import (
+    AudioInputStream,
+    AudioOutputStream,
+    get_windows_default_endpoints,
+    list_input_devices,
+    refresh_audio_devices,
+)
 from jarvis.config import JarvisConfig
 from jarvis.live_session import JarvisLiveSession
 from jarvis.memory import JarvisMemory
@@ -49,6 +55,8 @@ class JarvisBridge:
         self._active_task: dict[str, Any] | None = None
         self._pending_task_prompt: str = ""
         self._audio_in: AudioInputStream | None = None
+        self._audio_out: AudioOutputStream | None = None
+        self._default_endpoints: tuple[str, str] = ("", "")
         self._voice_mode: str = "wakeword"
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
@@ -252,18 +260,12 @@ class JarvisBridge:
         self._voice_mode = mode
         use_wakeword = mode == "wakeword"
         refresh_audio_devices()
-        await self._broadcast(
-            {
-                "type": "input_devices",
-                "devices": list_input_devices(),
-                "selected": self.config.input_device,
-            }
-        )
+        self._default_endpoints = get_windows_default_endpoints(ensure_mic_unmuted=True)
         audio_in = AudioInputStream(
             sample_rate=self.config.input_sample_rate,
             channels=self.config.audio_channels,
             blocksize=self.config.input_chunk_samples,
-            device=self.config.input_device or None,
+            device=None,
         )
         audio_out = AudioOutputStream(
             sample_rate=self.config.output_sample_rate,
@@ -274,6 +276,7 @@ class JarvisBridge:
             mic_queue = audio_in.start(loop)
             audio_out.start()
             self._audio_in = audio_in
+            self._audio_out = audio_out
         except Exception as exc:
             await self._broadcast({"type": "error", "message": f"Audio device error ({type(exc).__name__}: {exc})"})
             audio_in.stop()
@@ -382,6 +385,7 @@ class JarvisBridge:
             await self._broadcast({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         finally:
             self._audio_in = None
+            self._audio_out = None
             self._outbound_text_queue = None
             self._wake_event = None
             audio_in.stop()
@@ -634,8 +638,22 @@ class JarvisBridge:
 
     async def _mic_level_loop(self) -> None:
         last_sent = -1
+        ticks = 0
         while True:
             await asyncio.sleep(0.15)
+            ticks += 1
+            if ticks >= 12 and self._audio_in is not None:
+                ticks = 0
+                cur_eps = get_windows_default_endpoints(ensure_mic_unmuted=False)
+                if cur_eps != ("", "") and self._default_endpoints != ("", "") and cur_eps != self._default_endpoints:
+                    self._default_endpoints = get_windows_default_endpoints(ensure_mic_unmuted=True)
+                    refresh_audio_devices()
+                    try:
+                        self._audio_in.reopen_on_default()
+                        if self._audio_out is not None:
+                            self._audio_out.reopen_on_default()
+                    except Exception:
+                        pass
             if self._telemetry_paused or not self._clients:
                 continue
             level = self._audio_in.level_percent if self._audio_in is not None else 0
