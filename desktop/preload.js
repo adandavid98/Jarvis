@@ -9,7 +9,15 @@ contextBridge.exposeInMainWorld('jarvisDesktop', {
   hideOverlay: () => ipcRenderer.send('overlay:hide'),
   notifyWake: () => ipcRenderer.send('jarvis:wake'),
   notifyState: (state) => ipcRenderer.send('jarvis:state', state),
+  notifyReminder: (reminder) => ipcRenderer.send('reminder:notify', reminder),
   checkUpdates: () => ipcRenderer.send('app:check-updates'),
+  openLogsFolder: () => ipcRenderer.send('app:open-logs'),
+  restartBridge: () => ipcRenderer.send('bridge:restart'),
+  onWindowVisibility: (cb) => {
+    const handler = (_ev, visible) => cb(Boolean(visible));
+    ipcRenderer.on('window:visibility', handler);
+    return () => ipcRenderer.removeListener('window:visibility', handler);
+  },
   viewerOpen: (url) => ipcRenderer.send('viewer:open', url),
   viewerClose: () => ipcRenderer.send('viewer:close'),
   viewerNavigate: (action) => ipcRenderer.send('viewer:navigate', action),

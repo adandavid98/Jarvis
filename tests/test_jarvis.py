@@ -738,6 +738,244 @@ def test_wake_greeting_recording_without_cache(tmp_path: Path) -> None:
     assert cache_path.read_bytes() == greeting_bytes
 
 
+def test_bridge_rotating_logger_and_restart_voice(tmp_path: Path) -> None:
+    from jarvis.bridge import JarvisBridge, _setup_bridge_logger
+
+    logger = _setup_bridge_logger(tmp_path)
+    log_path = tmp_path / "logs" / "bridge.log"
+    assert log_path.parent.is_dir()
+
+    logger.info("bridge-log-check")
+    for h in logger.handlers:
+        h.flush()
+    assert log_path.exists()
+    assert "bridge-log-check" in log_path.read_text(encoding="utf-8")
+
+    cfg = JarvisConfig(
+        gemini_api_key="test-key",
+        data_dir=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        workspace_dir=tmp_path,
+    )
+    bridge = JarvisBridge(config=cfg)
+    bridge._voice_mode = "direct"
+
+    started_modes: list[str] = []
+
+    async def fake_run_voice(mode: str) -> None:
+        started_modes.append(mode)
+
+    bridge._run_voice_loop = fake_run_voice  # type: ignore[method-assign]
+
+    async def run() -> None:
+        await bridge._handle_command(json.dumps({"action": "restart_voice"}))
+        assert bridge._voice_task is not None
+        await bridge._voice_task
+
+    asyncio.run(run())
+    assert started_modes == ["direct"]
+
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+        h.close()
+
+
+def test_config_save_settings_and_memory_delete_due_reminders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import datetime, timedelta
+    from jarvis.memory import normalize_due_at
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    cfg = JarvisConfig(
+        gemini_api_key="k",
+        data_dir=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        workspace_dir=tmp_path,
+    )
+    saved = cfg.save_settings(
+        {
+            "voice_name": "Charon",
+            "wake_threshold": 0.99,
+            "silence_duration_ms": 200,
+            "idle_timeout_sec": 30,
+            "barge_in_enabled": False,
+            "auto_approve_dangerous": True,
+        }
+    )
+    assert saved["voice_name"] == "Charon"
+    assert saved["wake_threshold"] == 0.90
+    assert saved["silence_duration_ms"] == 500
+    assert saved["idle_timeout_sec"] == 30.0
+    assert saved["barge_in_enabled"] is False
+    assert saved["auto_approve_dangerous"] is True
+    env_txt = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "JARVIS_VOICE_NAME=Charon" in env_txt
+    assert "JARVIS_WAKE_THRESHOLD=0.90" in env_txt
+
+    memory = JarvisMemory(tmp_path / "jarvis.db")
+    memory.remember_fact("editor", "VS Code", "work")
+    assert len(memory.recall_facts("editor")) == 1
+    assert memory.delete_fact("editor") is True
+    assert memory.recall_facts("editor") == []
+
+    ref = datetime(2026, 11, 15, 10, 0, 0)
+    assert normalize_due_at("+15m", now=ref) == "2026-11-15 10:15:00"
+    assert normalize_due_at("14:30", now=ref) == "2026-11-15 14:30:00"
+
+    past_due = (datetime.now() - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+    future_due = (datetime.now() + timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
+    r_due = memory.add_reminder("Llamar al cliente", due_at=past_due)
+    memory.add_reminder("Reunion tarde", due_at=future_due)
+
+    claimed = memory.claim_due_reminders()
+    assert [r.id for r in claimed] == [r_due.id]
+    assert memory.claim_due_reminders() == []
+
+
+def test_system_control_and_bridge_settings_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvis.bridge import JarvisBridge
+
+    cfg = JarvisConfig(
+        gemini_api_key="k",
+        data_dir=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        workspace_dir=tmp_path,
+        auto_approve_dangerous=False,
+    )
+    memory = JarvisMemory(cfg.db_path)
+    registry = build_default_registry(cfg, memory)
+
+    fake_user32 = MagicMock()
+    monkeypatch.setattr("jarvis.tools.desktop.os.name", "nt")
+    monkeypatch.setattr("jarvis.tools.desktop.ctypes", MagicMock(windll=MagicMock(user32=fake_user32)), raising=False)
+
+    async def run_tools() -> None:
+        res_vol = await registry.execute("system_control", {"action": "volume_up", "value": 3})
+        assert res_vol["status"] == "ok"
+        assert fake_user32.keybd_event.call_count == 6
+
+        res_lock = await registry.execute("system_control", {"action": "lock_screen"})
+        assert res_lock["status"] == "needs_confirmation"
+
+        with patch("jarvis.tools.desktop.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="hola portapapeles", stderr="")
+            res_clip = await registry.execute("system_control", {"action": "clipboard_get"})
+            assert res_clip["status"] == "ok"
+            assert res_clip["text"] == "hola portapapeles"
+
+    asyncio.run(run_tools())
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    bridge = JarvisBridge(config=cfg)
+    events: list[dict[str, object]] = []
+
+    async def fake_broadcast(payload: dict[str, object]) -> None:
+        events.append(payload)
+
+    bridge._broadcast = fake_broadcast  # type: ignore[method-assign]
+    bridge.memory.remember_fact("os", "Windows", "system")
+
+    async def run_bridge() -> None:
+        await bridge._handle_command(json.dumps({"action": "delete_fact", "key": "os"}))
+        assert bridge.memory.recall_facts("os") == []
+        await bridge._handle_command(
+            json.dumps({"action": "save_settings", "settings": {"voice_name": "Puck", "wake_threshold": 0.42}})
+        )
+        assert bridge.config.voice_name == "Puck"
+        assert bridge.config.wake_threshold == 0.42
+        assert any(ev.get("type") == "settings_saved" for ev in events)
+
+    asyncio.run(run_bridge())
+
+
+def test_fts5_memory_search_and_web_search_snippets(tmp_path: Path) -> None:
+    db_path = tmp_path / "fts_test.db"
+    memory = JarvisMemory(db_path)
+    memory.remember_fact("servidor_produccion", "IP 10.20.30.40 puerto 8443", "work")
+    memory.remember_fact("cafe", "Americano sin azúcar", "preference")
+    memory.log_message("user", "Anota que la reunión de arquitectura es el jueves", source="voice")
+    memory.log_message("jarvis", "Listo, guardado sobre la reunión de arquitectura.", source="voice")
+
+    res = memory.search_memory("arquitectura produccion")
+    assert any(f["key"] == "servidor_produccion" for f in res["facts"])
+    assert any("arquitectura" in c["snippet"].lower() for c in res["conversations"])
+
+    # Verify diacritic-insensitive lookup via FTS5 ("azucar" finds "azúcar")
+    sweet = memory.recall_facts(query="azucar")
+    assert any(f.key == "cafe" for f in sweet)
+
+    cfg = JarvisConfig(
+        gemini_api_key="k",
+        data_dir=tmp_path,
+        db_path=db_path,
+        workspace_dir=tmp_path,
+    )
+    registry = build_default_registry(cfg, memory)
+
+    fake_html = """
+    <html><body>
+      <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa">Python 3.13 Release</a>
+      <a class="result__snippet">Python 3.13 introduces an improved interactive interpreter and free-threaded mode.</a>
+      <a class="result__a" href="https://example.com/b">Docs Overview</a>
+      <a class="result__snippet">Official documentation &amp; changelog highlights.</a>
+    </body></html>
+    """
+
+    class _FakeResp:
+        def __init__(self, status_code: int, text: str) -> None:
+            self.status_code = status_code
+            self.text = text
+
+        def json(self) -> dict[str, object]:
+            return {}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, url: str, params: dict[str, object] | None = None) -> _FakeResp:
+            if "html.duckduckgo.com" in url:
+                return _FakeResp(200, fake_html)
+            return _FakeResp(404, "")
+
+    async def run() -> None:
+        mem_tool = await registry.execute("search_memory", {"query": "servidor"})
+        assert mem_tool["status"] == "ok"
+        assert mem_tool["facts"][0]["key"] == "servidor_produccion"
+
+        with patch("jarvis.tools.desktop.httpx.AsyncClient", _FakeAsyncClient):
+            ws_res = await registry.execute("web_search", {"query": "python 3.13"})
+            assert ws_res["status"] == "ok"
+            assert len(ws_res["snippets"]) == 2
+            assert ws_res["snippets"][0]["url"] == "https://example.com/a"
+            assert "free-threaded mode" in ws_res["snippets"][0]["snippet"]
+
+    asyncio.run(run())
+
+
+def test_configure_utf8_stdio_handles_cp1252_unencodable() -> None:
+    import io
+    from jarvis.bridge import _configure_utf8_stdio
+
+    raw = io.BytesIO()
+    wrapper = io.TextIOWrapper(raw, encoding="cp1252", errors="strict")
+    with patch("jarvis.bridge.sys.stdout", wrapper):
+        _configure_utf8_stdio()
+        print("Jarvis listo ⚡ 🤖 ✓")
+        wrapper.flush()
+    decoded = raw.getvalue().decode("utf-8")
+    assert "Jarvis listo" in decoded
+
+
+
+
+
+
 
 
 

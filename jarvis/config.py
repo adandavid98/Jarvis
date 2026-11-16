@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -140,6 +141,53 @@ class JarvisConfig:
         target = self._save_env_var("JARVIS_INPUT_DEVICE", cleaned)
         self.input_device = cleaned
         return target
+
+    def get_public_settings(self) -> dict[str, Any]:
+        """Return user-tunable runtime settings safe to expose to the Desktop HUD."""
+        return {
+            "voice_name": self.voice_name,
+            "wake_threshold": round(float(self.wake_threshold), 2),
+            "silence_duration_ms": int(self.silence_duration_ms),
+            "idle_timeout_sec": float(self.idle_timeout_sec),
+            "barge_in_enabled": bool(self.barge_in_enabled),
+            "auto_approve_dangerous": bool(self.auto_approve_dangerous),
+            "input_device": self.input_device,
+        }
+
+    def save_settings(self, updates: dict[str, Any]) -> dict[str, Any]:
+        """Validate, persist to `.env`, and apply tunable settings in-memory."""
+        if "voice_name" in updates and str(updates["voice_name"]).strip():
+            voice = str(updates["voice_name"]).strip()
+            self._save_env_var("JARVIS_VOICE_NAME", voice)
+            self.voice_name = voice
+
+        if "wake_threshold" in updates:
+            wt = max(0.15, min(0.90, float(updates["wake_threshold"])))
+            wt = round(wt, 2)
+            self._save_env_var("JARVIS_WAKE_THRESHOLD", f"{wt:.2f}")
+            self.wake_threshold = wt
+
+        if "silence_duration_ms" in updates:
+            sil = max(500, min(3000, int(updates["silence_duration_ms"])))
+            self._save_env_var("JARVIS_SILENCE_DURATION_MS", str(sil))
+            self.silence_duration_ms = sil
+
+        if "idle_timeout_sec" in updates:
+            idle = max(5.0, min(120.0, float(updates["idle_timeout_sec"])))
+            self._save_env_var("JARVIS_IDLE_TIMEOUT_SEC", f"{idle:g}")
+            self.idle_timeout_sec = idle
+
+        if "barge_in_enabled" in updates:
+            barge = bool(updates["barge_in_enabled"])
+            self._save_env_var("JARVIS_BARGE_IN_ENABLED", "true" if barge else "false")
+            self.barge_in_enabled = barge
+
+        if "auto_approve_dangerous" in updates:
+            auto_ok = bool(updates["auto_approve_dangerous"])
+            self._save_env_var("JARVIS_AUTO_APPROVE_DANGEROUS", "true" if auto_ok else "false")
+            self.auto_approve_dangerous = auto_ok
+
+        return self.get_public_settings()
 
     def validate_for_live(self) -> None:
         """Ensure required credentials and sensible values exist before connecting."""

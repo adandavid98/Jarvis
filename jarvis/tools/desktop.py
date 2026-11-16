@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import html
 import os
 import platform
 import re
@@ -12,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import psutil
 
 from jarvis.config import JarvisConfig
@@ -301,23 +304,212 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             "bytes_written": target.stat().st_size,
         }
 
-    def web_search(query: str) -> dict[str, Any]:
+    _TAG_RE = re.compile(r"<[^>]+>")
+    _DDG_LINK_RE = re.compile(r'<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.I | re.S)
+    _DDG_SNIPPET_RE = re.compile(r'<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>', re.I | re.S)
+
+    def _clean_html_text(raw_html: str, limit: int) -> str:
+        plain = " ".join(html.unescape(_TAG_RE.sub(" ", raw_html)).split())
+        if len(plain) <= limit:
+            return plain
+        return plain[: max(0, limit - 3)].rstrip() + "..."
+
+    def _decode_ddg_href(href: str) -> str:
+        unescaped = html.unescape(href.strip())
+        parsed = urllib.parse.urlparse(unescaped)
+        if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+            qs = urllib.parse.parse_qs(parsed.query)
+            if qs.get("uddg"):
+                return qs["uddg"][0]
+        if unescaped.startswith("//"):
+            return "https:" + unescaped
+        return unescaped
+
+    async def _fetch_web_snippets(query: str, max_results: int = 3) -> list[dict[str, str]]:
+        """Fetch up to 3 tiny web snippets (~<700 chars total) with strict timeout & fallback."""
+        snippets: list[dict[str, str]] = []
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128.0 Safari/537.36"
+        }
+        try:
+            async with httpx.AsyncClient(timeout=4.5, follow_redirects=True, headers=headers) as client:
+                resp = await client.get(
+                    "https://html.duckduckgo.com/html/",
+                    params={"q": query},
+                )
+                if resp.status_code == 200 and resp.text:
+                    titles = _DDG_LINK_RE.findall(resp.text)
+                    bodies = _DDG_SNIPPET_RE.findall(resp.text)
+                    for idx, (href, raw_title) in enumerate(titles[:max_results]):
+                        title_txt = _clean_html_text(raw_title, 75)
+                        snip_txt = _clean_html_text(bodies[idx], 150) if idx < len(bodies) else ""
+                        if title_txt or snip_txt:
+                            snippets.append(
+                                {
+                                    "title": title_txt,
+                                    "url": _decode_ddg_href(href)[:160],
+                                    "snippet": snip_txt,
+                                }
+                            )
+                if not snippets:
+                    ia = await client.get(
+                        "https://api.duckduckgo.com/",
+                        params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
+                    )
+                    if ia.status_code == 200:
+                        data = ia.json()
+                        abstract = str(data.get("AbstractText") or "").strip()
+                        if abstract:
+                            snippets.append(
+                                {
+                                    "title": str(data.get("Heading") or query)[:75],
+                                    "url": str(data.get("AbstractURL") or "")[:160],
+                                    "snippet": _clean_html_text(abstract, 180),
+                                }
+                            )
+                        for topic in (data.get("RelatedTopics") or [])[:max_results]:
+                            if len(snippets) >= max_results:
+                                break
+                            if isinstance(topic, dict) and topic.get("Text"):
+                                snippets.append(
+                                    {
+                                        "title": _clean_html_text(str(topic["Text"]), 70),
+                                        "url": str(topic.get("FirstURL") or "")[:160],
+                                        "snippet": _clean_html_text(str(topic["Text"]), 140),
+                                    }
+                                )
+        except Exception:
+            return []
+        return snippets[:max_results]
+
+    async def web_search(query: str) -> dict[str, Any]:
         cleaned = query.strip()
         if not cleaned:
             return {"status": "error", "error": "Search query cannot be empty."}
         search_url = f"https://duckduckgo.com/?q={urllib.parse.quote_plus(cleaned)}"
         if os.environ.get("JARVIS_EMBEDDED_VIEWER") != "1":
             webbrowser.open(search_url)
+        snippets = await _fetch_web_snippets(cleaned, max_results=3)
         return {
             "status": "ok",
             "query": cleaned,
             "kind": "web_search",
             "viewer_url": search_url,
             "title": f"Search: {cleaned}",
+            "snippets": snippets,
         }
 
     def enter_standby() -> dict[str, Any]:
         return {"status": "ok", "standby": True, "message": "Returning to idle wake-word standby."}
+
+    def _send_win_vk(vk_code: int, taps: int = 1) -> None:
+        if os.name != "nt":
+            raise RuntimeError("Windows virtual key events are only supported on Windows.")
+        user32 = ctypes.windll.user32
+        keyeventf_keyup = 0x0002
+        for _ in range(max(1, taps)):
+            user32.keybd_event(vk_code, 0, 0, 0)
+            user32.keybd_event(vk_code, 0, keyeventf_keyup, 0)
+
+    def system_control(
+        action: str,
+        value: int = 0,
+        text: str = "",
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Control Windows audio volume, media playback, screen brightness, clipboard, or workstation lock."""
+        act = action.strip().lower()
+        vk_map = {
+            "volume_up": 0xAF,
+            "volume_down": 0xAE,
+            "mute_toggle": 0xAD,
+            "media_play_pause": 0xB3,
+            "media_next": 0xB0,
+            "media_prev": 0xB1,
+        }
+        if act in vk_map:
+            taps = max(1, min(20, int(value or (5 if act in {"volume_up", "volume_down"} else 1))))
+            _send_win_vk(vk_map[act], taps=taps)
+            return {"status": "ok", "action": act, "taps": taps}
+
+        if act == "clipboard_get":
+            if os.name != "nt":
+                return {"status": "error", "error": "Clipboard access is only supported on Windows."}
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            if proc.returncode != 0:
+                return {"status": "error", "error": (proc.stderr or "Failed to read clipboard").strip()}
+            clip = proc.stdout or ""
+            return {
+                "status": "ok",
+                "action": act,
+                "text": _truncate(clip, 3000),
+                "length": len(clip),
+            }
+
+        if act == "clipboard_set":
+            if os.name != "nt":
+                return {"status": "error", "error": "Clipboard access is only supported on Windows."}
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "$inText = [Console]::In.ReadToEnd(); Set-Clipboard -Value $inText"],
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            if proc.returncode != 0:
+                return {"status": "error", "error": (proc.stderr or "Failed to write clipboard").strip()}
+            return {"status": "ok", "action": act, "bytes": len(text.encode("utf-8"))}
+
+        if act in {"brightness_set", "brightness_up", "brightness_down"}:
+            if os.name != "nt":
+                return {"status": "error", "error": "Brightness control is only supported on Windows."}
+            if act == "brightness_set":
+                level = max(0, min(100, int(value)))
+                ps_cmd = (
+                    "$m = Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightnessMethods -ErrorAction Stop | Select-Object -First 1; "
+                    f"$null = Invoke-CimMethod -InputObject $m -MethodName WmiSetBrightness -Arguments @{{Timeout=1; Brightness={level}}}; "
+                    f"Write-Output {level}"
+                )
+            else:
+                delta = 15 if act == "brightness_up" else -15
+                ps_cmd = (
+                    "$cur = (Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightness -ErrorAction Stop | Select-Object -First 1).CurrentBrightness; "
+                    f"$target = [Math]::Max(0, [Math]::Min(100, [int]$cur + ({delta}))); "
+                    "$m = Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightnessMethods -ErrorAction Stop | Select-Object -First 1; "
+                    "$null = Invoke-CimMethod -InputObject $m -MethodName WmiSetBrightness -Arguments @{Timeout=1; Brightness=$target}; "
+                    "Write-Output $target"
+                )
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if proc.returncode != 0:
+                return {
+                    "status": "error",
+                    "error": (proc.stderr or "Display brightness WMI interface is unavailable on this monitor.").strip()[:400],
+                }
+            return {"status": "ok", "action": act, "brightness": proc.stdout.strip()}
+
+        if act == "lock_screen":
+            if not (confirmed or config.auto_approve_dangerous):
+                return {
+                    "status": "needs_confirmation",
+                    "action": act,
+                    "message": "Locking the Windows workstation requires user confirmation. Re-invoke with confirmed=true if requested.",
+                }
+            if os.name != "nt":
+                return {"status": "error", "error": "Workstation lock is only supported on Windows."}
+            ctypes.windll.user32.LockWorkStation()
+            return {"status": "ok", "action": act}
+
+        return {"status": "error", "error": f"Unsupported system_control action: {action}"}
 
     registry.register(
         ToolSpec(
@@ -347,7 +539,7 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
     registry.register(
         ToolSpec(
             name="web_search",
-            description="Search the web for a query and display the live results inside Jarvis's integrated viewer.",
+            description="Search the web for a query, returning up to 3 concise text snippets and opening live results in Jarvis's viewer.",
             parameters={
                 "type": "OBJECT",
                 "properties": {
@@ -367,6 +559,52 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             description="Return Jarvis to idle wake-word standby (listening only for 'Hey Jarvis') when the user says goodbye, 'that is all', 'standby', or 'go to sleep'.",
             parameters={"type": "OBJECT", "properties": {}},
             handler=enter_standby,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="system_control",
+            description=(
+                "Control Windows OS hardware & media quickly: volume_up, volume_down, mute_toggle, "
+                "media_play_pause, media_next, media_prev, brightness_set, brightness_up, brightness_down, "
+                "clipboard_get, clipboard_set, or lock_screen."
+            ),
+            parameters={
+                "type": "OBJECT",
+                "properties": {
+                    "action": {
+                        "type": "STRING",
+                        "enum": [
+                            "volume_up",
+                            "volume_down",
+                            "mute_toggle",
+                            "media_play_pause",
+                            "media_next",
+                            "media_prev",
+                            "brightness_set",
+                            "brightness_up",
+                            "brightness_down",
+                            "clipboard_get",
+                            "clipboard_set",
+                            "lock_screen",
+                        ],
+                    },
+                    "value": {
+                        "type": "INTEGER",
+                        "description": "Step count (1-20) for volume_up/down or target percentage (0-100) for brightness_set.",
+                    },
+                    "text": {
+                        "type": "STRING",
+                        "description": "Text to copy into the Windows clipboard (used with clipboard_set).",
+                    },
+                    "confirmed": {
+                        "type": "BOOLEAN",
+                        "description": "Set true when confirming lock_screen.",
+                    },
+                },
+                "required": ["action"],
+            },
+            handler=system_control,
         )
     )
     registry.register(

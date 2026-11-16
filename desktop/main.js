@@ -1,4 +1,5 @@
-const { app, BrowserWindow, WebContentsView, Tray, Menu, globalShortcut, ipcMain, screen, nativeImage, dialog, shell } = require('electron');
+const { app, BrowserWindow, WebContentsView, Tray, Menu, Notification, globalShortcut, ipcMain, screen, nativeImage, dialog, shell } = require('electron');
+const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const WebSocket = require('ws');
@@ -13,6 +14,8 @@ let tray = null;
 let bridgeProc = null;
 let isQuitting = false;
 let overlayHideTimer = null;
+let bridgeRestartTimestamps = [];
+let bridgeRestartTimer = null;
 
 function startPythonBridge() {
   const args = ['--port', String(BRIDGE_PORT), '--auto-voice'];
@@ -28,6 +31,8 @@ function startPythonBridge() {
         JARVIS_DATA_DIR: userDataDir,
         JARVIS_WORKSPACE_DIR: docsDir,
         JARVIS_AUTO_APPROVE_DANGEROUS: process.env.JARVIS_AUTO_APPROVE_DANGEROUS ?? 'true',
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -40,6 +45,8 @@ function startPythonBridge() {
       env: {
         ...process.env,
         JARVIS_AUTO_APPROVE_DANGEROUS: process.env.JARVIS_AUTO_APPROVE_DANGEROUS ?? 'true',
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -55,10 +62,31 @@ function startPythonBridge() {
   bridgeProc.on('exit', (code) => {
     console.log(`[bridge] exited with code ${code}`);
     bridgeProc = null;
+    if (isQuitting) return;
+    const now = Date.now();
+    bridgeRestartTimestamps = bridgeRestartTimestamps.filter((ts) => now - ts < 60000);
+    if (bridgeRestartTimestamps.length >= 5) {
+      console.error('[bridge] Restart rate limit exceeded (5 restarts/min). Automatic restart paused.');
+      return;
+    }
+    bridgeRestartTimestamps.push(now);
+    const delayMs = Math.min(8000, 1200 * bridgeRestartTimestamps.length);
+    console.log(`[bridge] Scheduling auto-restart in ${delayMs}ms...`);
+    if (bridgeRestartTimer) clearTimeout(bridgeRestartTimer);
+    bridgeRestartTimer = setTimeout(() => {
+      bridgeRestartTimer = null;
+      if (!isQuitting && !bridgeProc) {
+        startPythonBridge();
+      }
+    }, delayMs);
   });
 }
 
 function stopPythonBridge() {
+  if (bridgeRestartTimer) {
+    clearTimeout(bridgeRestartTimer);
+    bridgeRestartTimer = null;
+  }
   if (!bridgeProc) return;
   try {
     bridgeProc.kill();
@@ -75,7 +103,7 @@ function createMainWindow() {
     minWidth: 960,
     minHeight: 640,
     frame: false,
-    backgroundColor: '#04090b',
+    backgroundColor: '#02070d',
     icon: path.join(__dirname, 'assets', 'jarvis-icon.png'),
     title: 'J.A.R.V.I.S. — Windows Command HUD',
     webPreferences: {
@@ -165,6 +193,9 @@ function sendBridgeCommand(payload) {
 
 function setTelemetryPaused(paused) {
   sendBridgeCommand({ action: 'set_telemetry_paused', paused: Boolean(paused) });
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('window:visibility', !paused);
+  }
 }
 
 function triggerManualWake() {
@@ -256,6 +287,38 @@ ipcMain.on('window:maximize', () => {
 });
 ipcMain.on('window:close', () => mainWindow?.close());
 ipcMain.on('app:check-updates', () => checkForUpdates(true));
+ipcMain.on('app:open-logs', () => {
+  const logsDir = app.isPackaged
+    ? path.join(app.getPath('userData'), 'logs')
+    : path.resolve(__dirname, '..', 'data', 'logs');
+  try {
+    fs.mkdirSync(logsDir, { recursive: true });
+    shell.openPath(logsDir);
+  } catch (err) {
+    console.error('Failed opening logs folder:', err);
+  }
+});
+ipcMain.on('bridge:restart', () => {
+  bridgeRestartTimestamps = [];
+  stopPythonBridge();
+  if (!isQuitting) startPythonBridge();
+});
+ipcMain.on('reminder:notify', (_ev, rem) => {
+  if (!Notification.isSupported()) return;
+  const title = rem?.title ? String(rem.title) : 'Recordatorio de Jarvis';
+  const due = rem?.due_at ? ` (${rem.due_at})` : '';
+  const n = new Notification({
+    title: 'J.A.R.V.I.S. // Recordatorio',
+    body: `${title}${due}`,
+    icon: path.join(__dirname, 'assets', 'jarvis-icon.png'),
+  });
+  n.on('click', () => {
+    overlayWindow?.hide();
+    mainWindow?.show();
+    mainWindow?.focus();
+  });
+  n.show();
+});
 
 ipcMain.on('overlay:expand', () => {
   overlayWindow?.hide();
@@ -450,12 +513,17 @@ if (!gotLock) {
 } else {
   app.on('second-instance', () => {
     if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show();
+      mainWindow.moveTop();
       mainWindow.focus();
     }
   });
 
   app.whenReady().then(() => {
+    if (process.platform === 'win32') {
+      app.setAppUserModelId('com.jarvis.desktop');
+    }
     startPythonBridge();
     createMainWindow();
     createOverlayWindow();

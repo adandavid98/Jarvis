@@ -6,9 +6,13 @@ import argparse
 import asyncio
 import contextlib
 import json
+import logging
 import os
+import sys
 import uuid
 from dataclasses import asdict
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 import psutil
@@ -28,6 +32,38 @@ from jarvis.tools import build_default_registry
 from jarvis.wake_word import WakeWordDetector
 
 
+def _setup_bridge_logger(data_dir: Path) -> logging.Logger:
+    """Create or reuse a rotating file logger under `<data_dir>/logs/bridge.log`."""
+    log_dir = data_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = (log_dir / "bridge.log").resolve()
+
+    logger = logging.getLogger("jarvis.bridge")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    has_same_file = any(
+        isinstance(h, RotatingFileHandler) and Path(h.baseFilename).resolve() == log_path
+        for h in logger.handlers
+    )
+    if not has_same_file:
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
+            with contextlib.suppress(Exception):
+                h.close()
+        handler = RotatingFileHandler(
+            log_path,
+            maxBytes=2_000_000,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        )
+        logger.addHandler(handler)
+    return logger
+
+
 class JarvisBridge:
     """Hosts a local WebSocket server for the Desktop UI and manages Jarvis voice/text state."""
 
@@ -35,6 +71,7 @@ class JarvisBridge:
         self.config = config
         self.host = host
         self.port = port
+        self.logger = _setup_bridge_logger(config.data_dir)
         self.memory = JarvisMemory(config.db_path)
         self.registry = build_default_registry(config, self.memory)
         self.session_mgr = JarvisLiveSession(
@@ -73,6 +110,8 @@ class JarvisBridge:
             self._clients.discard(ws)
 
     async def _set_state(self, state: str) -> None:
+        if state != self._state:
+            self.logger.info("state=%s", state)
         self._state = state
         await self._broadcast({"type": "state", "state": state})
 
@@ -111,9 +150,17 @@ class JarvisBridge:
             kind = "command"
             cmd = str(args.get("command") or "")
             title = f"Ran command: {cmd[:70]}"
-        elif name in {"remember_fact", "manage_reminders"}:
+        elif name in {"remember_fact", "manage_reminders", "search_memory"}:
             kind = "memory"
-            title = "Updated synced memory" if name == "remember_fact" else "Updated reminders"
+            title = (
+                "Searched synced memory"
+                if name == "search_memory"
+                else ("Updated synced memory" if name == "remember_fact" else "Updated reminders")
+            )
+        elif name == "system_control":
+            kind = "system"
+            act = str(args.get("action") or res.get("action") or "")
+            title = f"System control: {act}" if act else "System control"
         return {
             "name": name,
             "kind": kind,
@@ -287,6 +334,7 @@ class JarvisBridge:
             self._audio_in = audio_in
             self._audio_out = audio_out
         except Exception as exc:
+            self.logger.exception("Audio device startup error")
             await self._broadcast({"type": "error", "message": f"Audio device error ({type(exc).__name__}: {exc})"})
             audio_in.stop()
             audio_out.stop()
@@ -352,6 +400,7 @@ class JarvisBridge:
                     raw = f"{type(exc).__name__}: {exc}"
                     low = raw.lower()
                     is_quota = "1011" in low or "exhausted" in low or "quota" in low or "429" in low
+                    self.logger.warning("Gemini Live error (attempt=%d, quota=%s): %s", consecutive_api_errors, is_quota, raw)
                     friendly = (
                         "Cuota o límite temporal de Gemini Live alcanzado (1011). Reintentando en modo espera..."
                         if is_quota
@@ -583,6 +632,13 @@ class JarvisBridge:
                 asyncio.create_task(_deferred_wake())
         elif action == "stop_voice":
             await self._stop_voice()
+        elif action == "restart_voice":
+            self.logger.info("Manual voice loop restart requested (mode=%s)", self._voice_mode)
+            if not self.config.gemini_api_key:
+                await self._broadcast({"type": "needs_api_key", "missing": True})
+                return
+            await self._stop_voice()
+            self._voice_task = asyncio.create_task(self._run_voice_loop(self._voice_mode))
         elif action == "standby":
             if self._voice_task and not self._voice_task.done():
                 self.session_mgr.request_standby()
@@ -632,6 +688,32 @@ class JarvisBridge:
             if key and value:
                 self.memory.remember_fact(key=key, value=value, category=cat)
                 await self._broadcast(self.build_memory_snapshot())
+        elif action == "delete_fact":
+            key = str(data.get("key", "")).strip()
+            if key and self.memory.delete_fact(key):
+                await self._broadcast(self.build_memory_snapshot())
+        elif action == "get_settings":
+            await self._broadcast({"type": "settings_snapshot", "settings": self.config.get_public_settings()})
+        elif action == "save_settings":
+            raw_settings = data.get("settings")
+            if isinstance(raw_settings, dict):
+                prev_voice = self.config.voice_name
+                prev_silence = self.config.silence_duration_ms
+                prev_barge = self.config.barge_in_enabled
+                updated = self.config.save_settings(raw_settings)
+                if self._detector is not None:
+                    self._detector.threshold = self.config.wake_threshold
+                self.logger.info("Settings updated: %s", updated)
+                await self._broadcast({"type": "settings_saved", "settings": updated})
+                needs_restart = (
+                    updated["voice_name"] != prev_voice
+                    or updated["silence_duration_ms"] != prev_silence
+                    or updated["barge_in_enabled"] != prev_barge
+                )
+                if needs_restart and self._voice_task and not self._voice_task.done() and self.config.gemini_api_key:
+                    self.session_mgr._resumption_handle = None
+                    await self._stop_voice()
+                    self._voice_task = asyncio.create_task(self._run_voice_loop(self._voice_mode))
         elif action == "refresh_memory":
             await self._broadcast(self.build_memory_snapshot())
         elif action == "refresh_devices":
@@ -679,6 +761,7 @@ class JarvisBridge:
                 )
             )
             await ws.send(json.dumps(self.build_telemetry(), default=str))
+            await ws.send(json.dumps({"type": "settings_snapshot", "settings": self.config.get_public_settings()}))
             await ws.send(json.dumps(self.build_memory_snapshot(), default=str))
             async for message in ws:
                 if isinstance(message, str):
@@ -693,6 +776,23 @@ class JarvisBridge:
                 continue
             await self._broadcast(self.build_telemetry())
 
+    async def _check_due_reminders(self) -> None:
+        due = self.memory.claim_due_reminders()
+        if not due:
+            return
+        for rem in due:
+            self.logger.info("Reminder due #%d: %s (due_at=%s)", rem.id, rem.title, rem.due_at)
+            await self._broadcast({"type": "reminder_due", "reminder": asdict(rem)})
+        await self._broadcast(self.build_memory_snapshot())
+
+    async def _reminders_loop(self) -> None:
+        while True:
+            await asyncio.sleep(5.0)
+            try:
+                await self._check_due_reminders()
+            except Exception:
+                self.logger.exception("Error checking due reminders")
+
     async def _mic_level_loop(self) -> None:
         last_sent = -1
         ticks = 0
@@ -705,12 +805,13 @@ class JarvisBridge:
                 if cur_eps != ("", "") and self._default_endpoints != ("", "") and cur_eps != self._default_endpoints:
                     self._default_endpoints = get_windows_default_endpoints(ensure_mic_unmuted=True)
                     refresh_audio_devices()
+                    self.logger.info("Default Windows audio endpoints changed -> %s", self._default_endpoints)
                     try:
                         self._audio_in.reopen_on_default()
                         if self._audio_out is not None:
                             self._audio_out.reopen_on_default()
                     except Exception:
-                        pass
+                        self.logger.exception("Failed reopening audio stream after endpoint switch")
             if self._telemetry_paused or not self._clients:
                 continue
             level = self._audio_in.level_percent if self._audio_in is not None else 0
@@ -722,19 +823,31 @@ class JarvisBridge:
         """Start the local WebSocket bridge server."""
         telemetry_task = asyncio.create_task(self._telemetry_loop())
         mic_level_task = asyncio.create_task(self._mic_level_loop())
+        reminders_task = asyncio.create_task(self._reminders_loop())
         if auto_start_voice and self.config.gemini_api_key:
             self._voice_task = asyncio.create_task(self._run_voice_loop("wakeword"))
         try:
             async with serve(self._ws_handler, self.host, self.port):
+                self.logger.info("Jarvis bridge listening on ws://%s:%d (auto_voice=%s)", self.host, self.port, auto_start_voice)
                 print(f"Jarvis bridge listening on ws://{self.host}:{self.port}")
                 await asyncio.Future()
         finally:
             telemetry_task.cancel()
             mic_level_task.cancel()
+            reminders_task.cancel()
             await self._stop_voice()
 
 
+def _configure_utf8_stdio() -> None:
+    """Prevent Windows cp1252 `UnicodeEncodeError` when printing transcripts/emojis."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            with contextlib.suppress(Exception):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main() -> int:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Jarvis Desktop Bridge")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
