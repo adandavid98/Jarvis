@@ -405,8 +405,8 @@ def test_audio_agc_and_wake_threshold() -> None:
     assert cfg.wake_threshold == 0.50
     assert cfg.wake_consecutive_frames == 2
     assert cfg.mute_mic_while_speaking is False
-    assert cfg.silence_duration_ms == 1100
-    assert cfg.prefix_padding_ms == 300
+    assert cfg.silence_duration_ms == 2200
+    assert cfg.prefix_padding_ms == 600
     assert cfg.barge_in_enabled is True
 
     det = WakeWordDetector()
@@ -1233,5 +1233,30 @@ def test_audio_output_stream_live_level_percent() -> None:
 
     out.clear()
     assert out.level_percent == 0
+
+
+def test_audio_input_defaults_to_shared_wasapi_so_other_apps_keep_mic(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sounddevice as sd
+    from jarvis.audio import AudioInputStream
+
+    captured_settings: list[object] = []
+
+    class _FakeStream:
+        def start(self) -> None:
+            pass
+
+    def _fake_input_stream(**kwargs: object) -> _FakeStream:
+        captured_settings.append(kwargs.get("extra_settings"))
+        return _FakeStream()
+
+    monkeypatch.delenv("JARVIS_WASAPI_EXCLUSIVE", raising=False)
+    monkeypatch.setattr("jarvis.audio.get_wasapi_default_device", lambda kind="input": 1)
+    monkeypatch.setattr(sd, "InputStream", _fake_input_stream)
+
+    stream = AudioInputStream(sample_rate=16000, channels=1, blocksize=1280)
+    stream._open_portaudio_stream()
+    assert len(captured_settings) == 1
+    assert captured_settings[0] is not None
+    assert getattr(captured_settings[0], "exclusive", False) is False
 
 

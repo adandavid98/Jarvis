@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import ctypes
+import os
 import sys
 import threading
 import time
@@ -400,16 +401,16 @@ class AudioInputStream:
         self._hp_zi = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
         self._prev_wake_sample: float = 0.0
 
-        # Adaptive noise blocker, pre-roll (240ms = 3 frames), and speech hangover (1.2s = 15 frames)
+        # Adaptive noise blocker, pre-roll (640ms = 8 frames), and speech hangover (1.76s = 22 frames)
         self._noise_rms: float = 95.0
         self._rms_history: collections.deque[float] = collections.deque(maxlen=40)
         self._env_gain: float = 1.0
         self._wake_env_rms: float = 250.0
         self._hangover: int = 0
         self._peak_streak: int = 0
-        self._pre_roll: collections.deque[np.ndarray] = collections.deque(maxlen=3)
+        self._pre_roll: collections.deque[np.ndarray] = collections.deque(maxlen=8)
         self._pending_preroll: list[np.ndarray] = []
-        self._wake_pre_roll: collections.deque[np.ndarray] = collections.deque(maxlen=3)
+        self._wake_pre_roll: collections.deque[np.ndarray] = collections.deque(maxlen=8)
         self._pending_wake_preroll: list[np.ndarray] = []
 
         # Full-duplex AEC & barge-in confirmation (2 consecutive frames = 160ms)
@@ -531,8 +532,8 @@ class AudioInputStream:
             elif self._hangover == 0 and f_rms < self._noise_rms * 1.25:
                 self._noise_rms = float(np.clip(0.85 * self._noise_rms + 0.15 * f_rms, 20.0, 1200.0))
 
-        is_sustained = barge_in_now or (f_rms > max(95.0, self._noise_rms * 1.75))
-        has_spike = (f_pk > max(280.0, self._noise_rms * 6.0)) or (w_pk > max(280.0, self._noise_rms * 6.0))
+        is_sustained = barge_in_now or (f_rms > max(70.0, self._noise_rms * 1.45))
+        has_spike = (f_pk > max(220.0, self._noise_rms * 4.5)) or (w_pk > max(220.0, self._noise_rms * 4.5))
         if has_spike and not is_sustained:
             self._peak_streak += 1
         elif is_sustained:
@@ -542,7 +543,7 @@ class AudioInputStream:
 
         is_voice = is_sustained or (self._peak_streak >= 2)
         if is_voice:
-            self._hangover = 10  # 800ms hangover preserves clauses while letting idle timeout trigger reliably
+            self._hangover = 22  # 1.76s hangover preserves full phrases and mid-sentence pauses
             target_gain = float(np.clip(9500.0 / max(100.0, f_pk), 1.2, 9.0))
             self._env_gain = 0.45 * self._env_gain + 0.55 * target_gain
             excess = max(0.0, f_rms - self._noise_rms * 1.35)
@@ -700,9 +701,32 @@ class AudioInputStream:
         wasapi_idx = get_wasapi_default_device("input") if dev_idx is None else dev_idx
         self._reset_dsp_state()
 
-        # 1. Try Windows WASAPI Exclusive mode at native sample rate & channels
-        #    (Bypasses broken Realtek Shared-Mode FxProperties APO on laptop mic arrays)
+        # 1. Prefer Windows WASAPI Shared Mode with auto_convert=True so other apps
+        #    (WhatsApp, Zoom, Chrome, Teams) can share the microphone simultaneously.
         if wasapi_idx is not None and hasattr(sd, "WasapiSettings"):
+            try:
+                self._capture_sample_rate = self.sample_rate
+                self._capture_channels = self.channels
+                stream = sd.InputStream(
+                    samplerate=self.sample_rate,
+                    channels=self.channels,
+                    dtype="int16",
+                    blocksize=self.blocksize,
+                    device=wasapi_idx,
+                    extra_settings=sd.WasapiSettings(auto_convert=True),
+                    callback=self._callback,
+                )
+                stream.start()
+                return stream
+            except Exception:
+                pass
+
+        # 2. Optional Windows WASAPI Exclusive mode ONLY if explicitly enabled via env
+        if (
+            os.getenv("JARVIS_WASAPI_EXCLUSIVE", "").strip().lower() == "true"
+            and wasapi_idx is not None
+            and hasattr(sd, "WasapiSettings")
+        ):
             try:
                 info = sd.query_devices(wasapi_idx, kind="input")
                 native_sr = int(round(float(info.get("default_samplerate", 48000)))) or 48000
@@ -717,25 +741,6 @@ class AudioInputStream:
                     blocksize=scaled_block,
                     device=wasapi_idx,
                     extra_settings=sd.WasapiSettings(exclusive=True),
-                    callback=self._callback,
-                )
-                stream.start()
-                return stream
-            except Exception:
-                pass
-
-        # 2. Try Windows WASAPI Shared mode with auto_convert=True at 16kHz
-        if wasapi_idx is not None and hasattr(sd, "WasapiSettings"):
-            try:
-                self._capture_sample_rate = self.sample_rate
-                self._capture_channels = self.channels
-                stream = sd.InputStream(
-                    samplerate=self.sample_rate,
-                    channels=self.channels,
-                    dtype="int16",
-                    blocksize=self.blocksize,
-                    device=wasapi_idx,
-                    extra_settings=sd.WasapiSettings(auto_convert=True),
                     callback=self._callback,
                 )
                 stream.start()

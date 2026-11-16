@@ -34,8 +34,8 @@ class JarvisConfig:
     idle_timeout_sec: float = 15.0
 
     # Full-duplex VAD & barge-in conversation controls
-    silence_duration_ms: int = 1100
-    prefix_padding_ms: int = 300
+    silence_duration_ms: int = 2200
+    prefix_padding_ms: int = 600
     barge_in_enabled: bool = True
 
     # Storage & workspace
@@ -90,8 +90,8 @@ class JarvisConfig:
             wake_threshold=float(os.getenv("JARVIS_WAKE_THRESHOLD", "0.50")),
             wake_consecutive_frames=max(1, int(os.getenv("JARVIS_WAKE_CONSECUTIVE_FRAMES", "2"))),
             idle_timeout_sec=float(os.getenv("JARVIS_IDLE_TIMEOUT_SEC", "15")),
-            silence_duration_ms=int(os.getenv("JARVIS_SILENCE_DURATION_MS", "1100")),
-            prefix_padding_ms=int(os.getenv("JARVIS_PREFIX_PADDING_MS", "300")),
+            silence_duration_ms=int(os.getenv("JARVIS_SILENCE_DURATION_MS", "2200")),
+            prefix_padding_ms=int(os.getenv("JARVIS_PREFIX_PADDING_MS", "600")),
             barge_in_enabled=os.getenv("JARVIS_BARGE_IN_ENABLED", "true").lower() == "true",
             data_dir=data_dir,
             db_path=db_path,
@@ -178,7 +178,7 @@ class JarvisConfig:
             self.wake_threshold = wt
 
         if "silence_duration_ms" in updates:
-            sil = max(500, min(3000, int(updates["silence_duration_ms"])))
+            sil = max(500, min(5000, int(updates["silence_duration_ms"])))
             self._save_env_var("JARVIS_SILENCE_DURATION_MS", str(sil))
             self.silence_duration_ms = sil
 
