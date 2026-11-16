@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import html
 import os
 import platform
 import re
@@ -12,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import psutil
 
 from jarvis.config import JarvisConfig
@@ -198,7 +201,7 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             path,
             allow_outside=config.auto_approve_dangerous,
         )
-        if target.exists() and not overwrite:
+        if target.exists() and not (overwrite or config.auto_approve_dangerous):
             return {
                 "status": "needs_confirmation",
                 "path": str(target),
@@ -213,23 +216,305 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             "bytes_written": len(content.encode("utf-8")),
         }
 
-    def web_search(query: str) -> dict[str, Any]:
+    def edit_file(path: str, target_text: str, replacement: str) -> dict[str, Any]:
+        target = resolve_workspace_path(
+            config.workspace_dir,
+            path,
+            allow_outside=config.auto_approve_dangerous,
+        )
+        if not target.is_file():
+            return {"status": "error", "error": f"File not found: {target}"}
+        original = target.read_text(encoding="utf-8", errors="replace")
+        if target_text not in original:
+            return {"status": "error", "error": "Target text not found in file."}
+        updated = original.replace(target_text, replacement, 1)
+        target.write_text(updated, encoding="utf-8")
+        return {"status": "ok", "path": str(target), "bytes_written": len(updated.encode("utf-8"))}
+
+    def create_document(
+        path: str,
+        title: str = "",
+        content: str = "",
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        target = resolve_workspace_path(
+            config.workspace_dir,
+            path,
+            allow_outside=config.auto_approve_dangerous,
+        )
+        if target.exists() and not (overwrite or config.auto_approve_dangerous):
+            return {
+                "status": "needs_confirmation",
+                "path": str(target),
+                "message": "File already exists. Ask user to confirm overwriting, then pass overwrite=true.",
+            }
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        ext = target.suffix.lower()
+        clean_title = title.strip()
+
+        if ext == ".pdf":
+            from fpdf import FPDF
+
+            pdf = FPDF()
+            pdf.set_auto_page_break(auto=True, margin=15)
+            pdf.add_page()
+
+            font_family = "Helvetica"
+            unicode_font = Path(r"C:\Windows\Fonts\arial.ttf")
+            if unicode_font.exists():
+                pdf.add_font("ArialUnicode", "", str(unicode_font))
+                bold_font = Path(r"C:\Windows\Fonts\arialbd.ttf")
+                if bold_font.exists():
+                    pdf.add_font("ArialUnicode", "B", str(bold_font))
+                font_family = "ArialUnicode"
+
+            if clean_title:
+                pdf.set_font(font_family, "B" if font_family != "ArialUnicode" or Path(r"C:\Windows\Fonts\arialbd.ttf").exists() else "", 16)
+                pdf.multi_cell(0, 9, clean_title)
+                pdf.ln(3)
+
+            pdf.set_font(font_family, "", 11)
+            for paragraph in content.splitlines():
+                if paragraph.strip():
+                    pdf.multi_cell(0, 6.5, paragraph)
+                else:
+                    pdf.ln(4)
+            pdf.output(str(target))
+        elif ext == ".docx":
+            from docx import Document
+
+            doc = Document()
+            if clean_title:
+                doc.add_heading(clean_title, level=1)
+            for paragraph in content.splitlines():
+                if paragraph.strip():
+                    doc.add_paragraph(paragraph)
+            doc.save(str(target))
+        else:
+            full_text = f"# {clean_title}\n\n{content}" if (clean_title and ext == ".md") else (
+                f"{clean_title}\n\n{content}" if clean_title else content
+            )
+            target.write_text(full_text, encoding="utf-8")
+
+        return {
+            "status": "ok",
+            "path": str(target),
+            "format": ext.lstrip(".") or "txt",
+            "bytes_written": target.stat().st_size,
+        }
+
+    _TAG_RE = re.compile(r"<[^>]+>")
+    _DDG_LINK_RE = re.compile(r'<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.I | re.S)
+    _DDG_SNIPPET_RE = re.compile(r'<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>', re.I | re.S)
+
+    def _clean_html_text(raw_html: str, limit: int) -> str:
+        plain = " ".join(html.unescape(_TAG_RE.sub(" ", raw_html)).split())
+        if len(plain) <= limit:
+            return plain
+        return plain[: max(0, limit - 3)].rstrip() + "..."
+
+    def _decode_ddg_href(href: str) -> str:
+        unescaped = html.unescape(href.strip())
+        parsed = urllib.parse.urlparse(unescaped)
+        if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+            qs = urllib.parse.parse_qs(parsed.query)
+            if qs.get("uddg"):
+                return qs["uddg"][0]
+        if unescaped.startswith("//"):
+            return "https:" + unescaped
+        return unescaped
+
+    async def _fetch_web_snippets(query: str, max_results: int = 3) -> list[dict[str, str]]:
+        """Fetch up to 3 tiny web snippets (~<700 chars total) with strict timeout & fallback."""
+        snippets: list[dict[str, str]] = []
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128.0 Safari/537.36"
+        }
+        try:
+            async with httpx.AsyncClient(timeout=4.5, follow_redirects=True, headers=headers) as client:
+                resp = await client.get(
+                    "https://html.duckduckgo.com/html/",
+                    params={"q": query},
+                )
+                if resp.status_code == 200 and resp.text:
+                    titles = _DDG_LINK_RE.findall(resp.text)
+                    bodies = _DDG_SNIPPET_RE.findall(resp.text)
+                    for idx, (href, raw_title) in enumerate(titles[:max_results]):
+                        title_txt = _clean_html_text(raw_title, 75)
+                        snip_txt = _clean_html_text(bodies[idx], 150) if idx < len(bodies) else ""
+                        if title_txt or snip_txt:
+                            snippets.append(
+                                {
+                                    "title": title_txt,
+                                    "url": _decode_ddg_href(href)[:160],
+                                    "snippet": snip_txt,
+                                }
+                            )
+                if not snippets:
+                    ia = await client.get(
+                        "https://api.duckduckgo.com/",
+                        params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
+                    )
+                    if ia.status_code == 200:
+                        data = ia.json()
+                        abstract = str(data.get("AbstractText") or "").strip()
+                        if abstract:
+                            snippets.append(
+                                {
+                                    "title": str(data.get("Heading") or query)[:75],
+                                    "url": str(data.get("AbstractURL") or "")[:160],
+                                    "snippet": _clean_html_text(abstract, 180),
+                                }
+                            )
+                        for topic in (data.get("RelatedTopics") or [])[:max_results]:
+                            if len(snippets) >= max_results:
+                                break
+                            if isinstance(topic, dict) and topic.get("Text"):
+                                snippets.append(
+                                    {
+                                        "title": _clean_html_text(str(topic["Text"]), 70),
+                                        "url": str(topic.get("FirstURL") or "")[:160],
+                                        "snippet": _clean_html_text(str(topic["Text"]), 140),
+                                    }
+                                )
+        except Exception:
+            return []
+        return snippets[:max_results]
+
+    async def web_search(query: str) -> dict[str, Any]:
         cleaned = query.strip()
         if not cleaned:
             return {"status": "error", "error": "Search query cannot be empty."}
         search_url = f"https://duckduckgo.com/?q={urllib.parse.quote_plus(cleaned)}"
         if os.environ.get("JARVIS_EMBEDDED_VIEWER") != "1":
             webbrowser.open(search_url)
+        snippets = await _fetch_web_snippets(cleaned, max_results=3)
         return {
             "status": "ok",
             "query": cleaned,
             "kind": "web_search",
             "viewer_url": search_url,
             "title": f"Search: {cleaned}",
+            "snippets": snippets,
         }
 
-    def enter_standby() -> dict[str, Any]:
-        return {"status": "ok", "standby": True, "message": "Returning to idle wake-word standby."}
+    def enter_standby(reason: str = "") -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "standby": True,
+            "reason": reason.strip(),
+            "message": "Returning to idle wake-word standby.",
+        }
+
+    def _send_win_vk(vk_code: int, taps: int = 1) -> None:
+        if os.name != "nt":
+            raise RuntimeError("Windows virtual key events are only supported on Windows.")
+        user32 = ctypes.windll.user32
+        keyeventf_keyup = 0x0002
+        for _ in range(max(1, taps)):
+            user32.keybd_event(vk_code, 0, 0, 0)
+            user32.keybd_event(vk_code, 0, keyeventf_keyup, 0)
+
+    def system_control(
+        action: str,
+        value: int = 0,
+        text: str = "",
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Control Windows audio volume, media playback, screen brightness, clipboard, or workstation lock."""
+        act = action.strip().lower()
+        vk_map = {
+            "volume_up": 0xAF,
+            "volume_down": 0xAE,
+            "mute_toggle": 0xAD,
+            "media_play_pause": 0xB3,
+            "media_next": 0xB0,
+            "media_prev": 0xB1,
+        }
+        if act in vk_map:
+            taps = max(1, min(20, int(value or (5 if act in {"volume_up", "volume_down"} else 1))))
+            _send_win_vk(vk_map[act], taps=taps)
+            return {"status": "ok", "action": act, "taps": taps}
+
+        if act == "clipboard_get":
+            if os.name != "nt":
+                return {"status": "error", "error": "Clipboard access is only supported on Windows."}
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            if proc.returncode != 0:
+                return {"status": "error", "error": (proc.stderr or "Failed to read clipboard").strip()}
+            clip = proc.stdout or ""
+            return {
+                "status": "ok",
+                "action": act,
+                "text": _truncate(clip, 3000),
+                "length": len(clip),
+            }
+
+        if act == "clipboard_set":
+            if os.name != "nt":
+                return {"status": "error", "error": "Clipboard access is only supported on Windows."}
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "$inText = [Console]::In.ReadToEnd(); Set-Clipboard -Value $inText"],
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            if proc.returncode != 0:
+                return {"status": "error", "error": (proc.stderr or "Failed to write clipboard").strip()}
+            return {"status": "ok", "action": act, "bytes": len(text.encode("utf-8"))}
+
+        if act in {"brightness_set", "brightness_up", "brightness_down"}:
+            if os.name != "nt":
+                return {"status": "error", "error": "Brightness control is only supported on Windows."}
+            if act == "brightness_set":
+                level = max(0, min(100, int(value)))
+                ps_cmd = (
+                    "$m = Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightnessMethods -ErrorAction Stop | Select-Object -First 1; "
+                    f"$null = Invoke-CimMethod -InputObject $m -MethodName WmiSetBrightness -Arguments @{{Timeout=1; Brightness={level}}}; "
+                    f"Write-Output {level}"
+                )
+            else:
+                delta = 15 if act == "brightness_up" else -15
+                ps_cmd = (
+                    "$cur = (Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightness -ErrorAction Stop | Select-Object -First 1).CurrentBrightness; "
+                    f"$target = [Math]::Max(0, [Math]::Min(100, [int]$cur + ({delta}))); "
+                    "$m = Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightnessMethods -ErrorAction Stop | Select-Object -First 1; "
+                    "$null = Invoke-CimMethod -InputObject $m -MethodName WmiSetBrightness -Arguments @{Timeout=1; Brightness=$target}; "
+                    "Write-Output $target"
+                )
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if proc.returncode != 0:
+                return {
+                    "status": "error",
+                    "error": (proc.stderr or "Display brightness WMI interface is unavailable on this monitor.").strip()[:400],
+                }
+            return {"status": "ok", "action": act, "brightness": proc.stdout.strip()}
+
+        if act == "lock_screen":
+            if not (confirmed or config.auto_approve_dangerous):
+                return {
+                    "status": "needs_confirmation",
+                    "action": act,
+                    "message": "Locking the Windows workstation requires user confirmation. Re-invoke with confirmed=true if requested.",
+                }
+            if os.name != "nt":
+                return {"status": "error", "error": "Workstation lock is only supported on Windows."}
+            ctypes.windll.user32.LockWorkStation()
+            return {"status": "ok", "action": act}
+
+        return {"status": "error", "error": f"Unsupported system_control action: {action}"}
 
     registry.register(
         ToolSpec(
@@ -259,7 +544,7 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
     registry.register(
         ToolSpec(
             name="web_search",
-            description="Search the web for a query and display the live results inside Jarvis's integrated viewer.",
+            description="Search the web for a query, returning up to 3 concise text snippets and opening live results in Jarvis's viewer.",
             parameters={
                 "type": "OBJECT",
                 "properties": {
@@ -276,9 +561,67 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
     registry.register(
         ToolSpec(
             name="enter_standby",
-            description="Return Jarvis to idle wake-word standby (listening only for 'Hey Jarvis') when the user says goodbye, 'that is all', 'standby', or 'go to sleep'.",
-            parameters={"type": "OBJECT", "properties": {}},
+            description=(
+                "ONLY call when the user explicitly commands Jarvis to go to sleep, enter standby, "
+                "stop listening, or says goodbye (e.g. 'standby', 'go to sleep', 'descansa', 'adiós', "
+                "'eso es todo'). NEVER call during unfinished sentences, pauses, or unrelated requests."
+            ),
+            parameters={
+                "type": "OBJECT",
+                "properties": {
+                    "reason": {
+                        "type": "STRING",
+                        "description": "Exact short user phrase requesting standby/goodbye.",
+                    }
+                },
+            },
             handler=enter_standby,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="system_control",
+            description=(
+                "Control Windows OS hardware & media quickly: volume_up, volume_down, mute_toggle, "
+                "media_play_pause, media_next, media_prev, brightness_set, brightness_up, brightness_down, "
+                "clipboard_get, clipboard_set, or lock_screen."
+            ),
+            parameters={
+                "type": "OBJECT",
+                "properties": {
+                    "action": {
+                        "type": "STRING",
+                        "enum": [
+                            "volume_up",
+                            "volume_down",
+                            "mute_toggle",
+                            "media_play_pause",
+                            "media_next",
+                            "media_prev",
+                            "brightness_set",
+                            "brightness_up",
+                            "brightness_down",
+                            "clipboard_get",
+                            "clipboard_set",
+                            "lock_screen",
+                        ],
+                    },
+                    "value": {
+                        "type": "INTEGER",
+                        "description": "Step count (1-20) for volume_up/down or target percentage (0-100) for brightness_set.",
+                    },
+                    "text": {
+                        "type": "STRING",
+                        "description": "Text to copy into the Windows clipboard (used with clipboard_set).",
+                    },
+                    "confirmed": {
+                        "type": "BOOLEAN",
+                        "description": "Set true when confirming lock_screen.",
+                    },
+                },
+                "required": ["action"],
+            },
+            handler=system_control,
         )
     )
     registry.register(
@@ -333,16 +676,49 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
     registry.register(
         ToolSpec(
             name="write_file",
-            description="Create or update a file inside the workspace directory.",
+            description="Create or update a text/code file at any accessible path.",
             parameters={
                 "type": "OBJECT",
                 "properties": {
-                    "path": {"type": "STRING", "description": "Path inside the workspace."},
+                    "path": {"type": "STRING", "description": "Relative or absolute file path."},
                     "content": {"type": "STRING", "description": "Full text content to write."},
-                    "overwrite": {"type": "BOOLEAN", "description": "Must be true to overwrite an existing file."},
+                    "overwrite": {"type": "BOOLEAN", "description": "Set true to overwrite an existing file."},
                 },
                 "required": ["path", "content"],
             },
             handler=write_file,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="edit_file",
+            description="Replace a specific text block inside an existing file.",
+            parameters={
+                "type": "OBJECT",
+                "properties": {
+                    "path": {"type": "STRING", "description": "Relative or absolute file path."},
+                    "target_text": {"type": "STRING", "description": "Exact existing text to replace."},
+                    "replacement": {"type": "STRING", "description": "New text to substitute."},
+                },
+                "required": ["path", "target_text", "replacement"],
+            },
+            handler=edit_file,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="create_document",
+            description="Create a formatted document (.pdf, .docx, .md, .txt, .html) at any path such as Downloads, Desktop, or Documents.",
+            parameters={
+                "type": "OBJECT",
+                "properties": {
+                    "path": {"type": "STRING", "description": "Output file path ending in .pdf, .docx, .md, .txt, or .html."},
+                    "title": {"type": "STRING", "description": "Optional document heading/title."},
+                    "content": {"type": "STRING", "description": "Full body text of the document."},
+                    "overwrite": {"type": "BOOLEAN", "description": "Set true to overwrite an existing file."},
+                },
+                "required": ["path", "content"],
+            },
+            handler=create_document,
         )
     )

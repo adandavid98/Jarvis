@@ -51,18 +51,22 @@ async def run_wakeword_loop(
     detector = WakeWordDetector(
         model_name=config.wake_word_model,
         threshold=config.wake_threshold,
+        consecutive_frames=config.wake_consecutive_frames,
     )
     print(f"Loading wake word model '{config.wake_word_model}'...")
     await asyncio.to_thread(detector.load)
 
+    audio_out = AudioOutputStream(
+        sample_rate=config.output_sample_rate,
+        channels=config.audio_channels,
+    )
     audio_in = AudioInputStream(
         sample_rate=config.input_sample_rate,
         channels=config.audio_channels,
         blocksize=config.input_chunk_samples,
-    )
-    audio_out = AudioOutputStream(
-        sample_rate=config.output_sample_rate,
-        channels=config.audio_channels,
+        playback_ref=audio_out.playback_ref,
+        on_barge_in=audio_out.clear,
+        barge_in_enabled=config.barge_in_enabled,
     )
 
     loop = asyncio.get_running_loop()
@@ -73,7 +77,9 @@ async def run_wakeword_loop(
     try:
         while True:
             frame = await mic_queue.get()
-            detected, score = detector.process_frame(frame)
+            wake_pair = audio_in.pop_wake_frame()
+            wake_frame, speech_active = wake_pair if wake_pair is not None else (frame, True)
+            detected, score = detector.process_frame(wake_frame, speech_active=speech_active)
             if not detected:
                 continue
 
@@ -86,6 +92,7 @@ async def run_wakeword_loop(
                 audio_out=audio_out,
                 mic_queue=mic_queue,
                 idle_timeout_sec=config.idle_timeout_sec,
+                wake_greeting=True,
             )
             print(f"[wake] Session ended ({reason}). Returning to local wake word listening.")
             detector.reset()
@@ -100,14 +107,17 @@ async def run_direct_voice(
     session_mgr: JarvisLiveSession,
 ) -> None:
     """Connect immediately to Gemini Live without wake word gating."""
+    audio_out = AudioOutputStream(
+        sample_rate=config.output_sample_rate,
+        channels=config.audio_channels,
+    )
     audio_in = AudioInputStream(
         sample_rate=config.input_sample_rate,
         channels=config.audio_channels,
         blocksize=config.input_chunk_samples,
-    )
-    audio_out = AudioOutputStream(
-        sample_rate=config.output_sample_rate,
-        channels=config.audio_channels,
+        playback_ref=audio_out.playback_ref,
+        on_barge_in=audio_out.clear,
+        barge_in_enabled=config.barge_in_enabled,
     )
 
     loop = asyncio.get_running_loop()

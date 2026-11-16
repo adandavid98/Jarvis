@@ -8,68 +8,122 @@
 </head>
 <body>
   <div class="hud-grid"></div>
+  <div class="hud-vignette"></div>
 
   <div class="app-shell">
-    <!-- Custom Frameless Windows Titlebar -->
-    <div class="titlebar">
+    <!-- Custom Frameless Stark Windows Titlebar -->
+    <header class="titlebar">
       <div class="titlebar-brand">
         <span class="pulse-dot" id="conn-dot"></span>
-        <span>J.A.R.V.I.S. // WINDOWS COMMAND HUD</span>
+        <div class="brand-titles">
+          <span class="brand-main">J.A.R.V.I.S.</span>
+          <span class="brand-sub">MARK VII // TACTICAL HUD</span>
+        </div>
         <span class="badge" id="model-badge">GEMINI-3.8-LIVE</span>
+        <span class="hud-clock" id="hud-clock">00:00:00</span>
       </div>
       <div class="window-controls">
+        <button id="btn-sfx" class="pill-ctrl" title="Toggle HUD Sound Effects">SFX: ON</button>
+        <button id="btn-logs" title="Open Bridge Logs Folder">LOGS</button>
         <button id="btn-update" title="Check for Updates">↻</button>
-        <button id="btn-key" title="Set Gemini API Key">⚙</button>
+        <button id="btn-key" title="Set Gemini API Key">KEY</button>
+        <button id="btn-settings" title="Jarvis System Settings">⚙</button>
         <button id="btn-min" title="Minimize">─</button>
         <button id="btn-max" title="Maximize">□</button>
         <button id="btn-close" class="danger" title="Close">✕</button>
       </div>
-    </div>
+    </header>
 
-    <!-- Main 3-Column HUD -->
+    <!-- Main 3-Column Stark HUD -->
     <main class="hud-layout">
       <!-- Left: System Telemetry + Synced Facts -->
       <section class="panel left-panel">
-        <div class="panel-header">SYSTEM TELEMETRY</div>
+        <span class="corner-br tl"></span><span class="corner-br tr"></span>
+        <span class="corner-br bl"></span><span class="corner-br br"></span>
+
+        <div class="panel-header">
+          <span>SYS.01 // SYSTEM TELEMETRY</span>
+          <span class="tag-live">LIVE</span>
+        </div>
+
         <div class="telemetry-grid">
-          <div class="metric">
-            <div class="metric-label"><span>CPU</span><span id="cpu-val">--%</span></div>
-            <div class="bar"><div class="bar-fill" id="cpu-bar"></div></div>
+          <div class="radial-row">
+            <div class="radial-card">
+              <div class="radial-wrap">
+                <svg class="radial-svg" viewBox="0 0 72 72">
+                  <circle class="radial-track" cx="36" cy="36" r="28"></circle>
+                  <circle class="radial-arc" id="cpu-arc" cx="36" cy="36" r="28"></circle>
+                </svg>
+                <div class="radial-center">
+                  <span class="radial-val" id="cpu-val">--%</span>
+                  <span class="radial-lbl">CPU</span>
+                </div>
+              </div>
+              <div class="bar"><div class="bar-fill" id="cpu-bar"></div></div>
+            </div>
+
+            <div class="radial-card">
+              <div class="radial-wrap">
+                <svg class="radial-svg" viewBox="0 0 72 72">
+                  <circle class="radial-track" cx="36" cy="36" r="28"></circle>
+                  <circle class="radial-arc ram" id="ram-arc" cx="36" cy="36" r="28"></circle>
+                </svg>
+                <div class="radial-center">
+                  <span class="radial-val" id="ram-val">--%</span>
+                  <span class="radial-lbl">MEM</span>
+                </div>
+              </div>
+              <div class="bar"><div class="bar-fill" id="ram-bar"></div></div>
+            </div>
           </div>
-          <div class="metric">
-            <div class="metric-label"><span>MEMORY</span><span id="ram-val">--%</span></div>
-            <div class="bar"><div class="bar-fill" id="ram-bar"></div></div>
+
+          <div class="metric-row">
+            <span>STORAGE FREE</span>
+            <span class="metric-num" id="disk-val">-- GB</span>
           </div>
           <div class="metric-row">
-            <span>DISK FREE</span>
-            <span id="disk-val">-- GB</span>
-          </div>
-          <div class="metric-row">
-            <span>BATTERY</span>
-            <span id="bat-val">--</span>
+            <span>POWER CELL</span>
+            <span class="metric-num" id="bat-val">--</span>
           </div>
         </div>
 
-        <div class="panel-header mt-16">SYNCED MEMORY (FACTS)</div>
+        <div class="panel-header mt-16">
+          <span>MEM.02 // SYNCED MEMORY</span>
+        </div>
         <div class="scroll-list" id="facts-list">
           <div class="empty-hint">No facts saved yet.</div>
         </div>
       </section>
 
-      <!-- Center: Reactive Core Orb + Voice Controls + Live Conversation -->
+      <!-- Center: Arc Reactor Core + Voice Controls + Tactical Feed -->
       <section class="panel center-panel">
+        <span class="corner-br tl"></span><span class="corner-br tr"></span>
+        <span class="corner-br bl"></span><span class="corner-br br"></span>
+
+        <div class="reactor-header">
+          <span class="reactor-id">CORE // ARC REACTOR V7</span>
+          <span class="state-pill" id="state-sub">INITIALIZING LINK</span>
+        </div>
+
         <div class="orb-stage">
-          <div class="orb-ring outer"></div>
-          <div class="orb-ring inner"></div>
-          <div class="orb-core" id="jarvis-orb">
+          <canvas id="reactor-canvas" width="220" height="220"></canvas>
+          <div class="orb-core" id="jarvis-orb" title="Click Arc Reactor to Wake / Standby">
             <span id="state-label">CONNECTING</span>
           </div>
         </div>
 
         <div class="voice-controls">
-          <button class="ctrl-btn primary" id="btn-wakeword">WAKE WORD ("HEY JARVIS")</button>
+          <button class="ctrl-btn primary" id="btn-wake-now">LISTEN NOW</button>
+          <button class="ctrl-btn" id="btn-wakeword">WAKE WORD ("HEY JARVIS")</button>
           <button class="ctrl-btn" id="btn-direct">DIRECT VOICE</button>
           <button class="ctrl-btn danger" id="btn-stop">MUTE / STOP</button>
+        </div>
+
+        <div class="mic-bar-row">
+          <span class="mic-label">MIC INPUT</span>
+          <div class="mic-meter" title="Live Windows Microphone Level">
+            <div class="mic-meter-fill" id="mic-bar"></div>
+          </div>
         </div>
 
         <div class="feed-toolbar">
@@ -112,27 +166,35 @@
           <input
             type="text"
             id="chat-input"
-            placeholder="Ask Jarvis in English or Spanish..."
+            placeholder="Command Jarvis in English or Spanish..."
             autocomplete="off"
           />
-          <button type="submit" class="ctrl-btn primary">SEND</button>
+          <button type="submit" class="ctrl-btn primary">TRANSMIT</button>
         </form>
       </section>
 
-      <!-- Right: Outstanding Reminders + Tool Activity -->
+      <!-- Right: Directives / Reminders + Subsystem Activity -->
       <section class="panel right-panel">
-        <div class="panel-header">OUTSTANDING REMINDERS</div>
+        <span class="corner-br tl"></span><span class="corner-br tr"></span>
+        <span class="corner-br bl"></span><span class="corner-br br"></span>
+
+        <div class="panel-header">
+          <span>DIR.03 // DIRECTIVES</span>
+        </div>
         <form class="mini-form" id="reminder-form">
-          <input type="text" id="reminder-input" placeholder="Add task / reminder..." autocomplete="off" />
+          <input type="text" id="reminder-input" placeholder="Task / reminder..." autocomplete="off" />
+          <input type="text" id="reminder-due" class="due-input" placeholder="16:30 / +10m" title="Optional time (e.g. 16:30, +10m)" autocomplete="off" />
           <button type="submit" class="ctrl-btn">+</button>
         </form>
         <div class="scroll-list" id="reminders-list">
           <div class="empty-hint">No outstanding reminders.</div>
         </div>
 
-        <div class="panel-header mt-16">LIVE TOOL ACTIVITY</div>
+        <div class="panel-header mt-16">
+          <span>OPS.04 // SUBSYSTEM LOG</span>
+        </div>
         <div class="scroll-list" id="tools-list">
-          <div class="empty-hint">Waiting for tool calls...</div>
+          <div class="empty-hint">Awaiting subsystem calls...</div>
         </div>
       </section>
     </main>
@@ -149,6 +211,70 @@
         <input type="password" id="api-key-input" placeholder="Paste GEMINI_API_KEY..." autocomplete="off" />
         <button type="submit" class="ctrl-btn primary">SAVE</button>
         <button type="button" class="ctrl-btn" id="btn-key-cancel">CANCEL</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- System & Voice Settings Modal -->
+  <div class="modal-backdrop hidden" id="settings-modal">
+    <div class="modal-card settings-card">
+      <div class="panel-header">
+        <span>SYS.CFG // STARK CORE SETTINGS</span>
+        <span class="tag-live">0 TOKENS</span>
+      </div>
+      <form id="settings-form" class="settings-form">
+        <div class="setting-row">
+          <label for="set-voice">Jarvis Voice Profile</label>
+          <select id="set-voice">
+            <option value="Fenrir">Fenrir (Deep Tactical)</option>
+            <option value="Charon">Charon (Calm Analyst)</option>
+            <option value="Puck">Puck (Crisp Agile)</option>
+            <option value="Orus">Orus (Executive)</option>
+            <option value="Kore">Kore (Balanced)</option>
+            <option value="Aoede">Aoede (Warm Clear)</option>
+            <option value="Leda">Leda (Light)</option>
+            <option value="Zephyr">Zephyr (Bright)</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-label-row">
+            <label for="set-wake-threshold">Wake Word Strictness ("Hey Jarvis")</label>
+            <span class="setting-val" id="set-wake-val">0.50</span>
+          </div>
+          <input type="range" id="set-wake-threshold" min="0.15" max="0.85" step="0.05" value="0.50" />
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-label-row">
+            <label for="set-silence-ms">End-of-Speech Pause</label>
+            <span class="setting-val" id="set-silence-val">1100 ms</span>
+          </div>
+          <input type="range" id="set-silence-ms" min="600" max="2500" step="100" value="1100" />
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-label-row">
+            <label for="set-idle-sec">Auto-Standby Timeout</label>
+            <span class="setting-val" id="set-idle-val">15 s</span>
+          </div>
+          <input type="range" id="set-idle-sec" min="5" max="60" step="5" value="15" />
+        </div>
+
+        <label class="setting-toggle">
+          <input type="checkbox" id="set-barge-in" checked />
+          <span>Full-Duplex Barge-In (interrupt Jarvis mid-speech)</span>
+        </label>
+
+        <label class="setting-toggle">
+          <input type="checkbox" id="set-auto-approve" checked />
+          <span>Auto-Approve Local File &amp; Shell Automation</span>
+        </label>
+
+        <div class="settings-actions">
+          <button type="button" class="ctrl-btn" id="btn-settings-cancel">CANCEL</button>
+          <button type="submit" class="ctrl-btn primary">SAVE &amp; APPLY</button>
+        </div>
       </form>
     </div>
   </div>

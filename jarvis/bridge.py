@@ -6,20 +6,62 @@ import argparse
 import asyncio
 import contextlib
 import json
+import logging
 import os
+import sys
 import uuid
 from dataclasses import asdict
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 import psutil
 from websockets.asyncio.server import ServerConnection, serve
 
-from jarvis.audio import AudioInputStream, AudioOutputStream
+from jarvis.audio import (
+    AudioInputStream,
+    AudioOutputStream,
+    get_windows_default_endpoints,
+    list_input_devices,
+    refresh_audio_devices,
+)
 from jarvis.config import JarvisConfig
 from jarvis.live_session import JarvisLiveSession
 from jarvis.memory import JarvisMemory
 from jarvis.tools import build_default_registry
 from jarvis.wake_word import WakeWordDetector
+
+
+def _setup_bridge_logger(data_dir: Path) -> logging.Logger:
+    """Create or reuse a rotating file logger under `<data_dir>/logs/bridge.log`."""
+    log_dir = data_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = (log_dir / "bridge.log").resolve()
+
+    logger = logging.getLogger("jarvis.bridge")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    has_same_file = any(
+        isinstance(h, RotatingFileHandler) and Path(h.baseFilename).resolve() == log_path
+        for h in logger.handlers
+    )
+    if not has_same_file:
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
+            with contextlib.suppress(Exception):
+                h.close()
+        handler = RotatingFileHandler(
+            log_path,
+            maxBytes=2_000_000,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        )
+        logger.addHandler(handler)
+    return logger
 
 
 class JarvisBridge:
@@ -29,6 +71,7 @@ class JarvisBridge:
         self.config = config
         self.host = host
         self.port = port
+        self.logger = _setup_bridge_logger(config.data_dir)
         self.memory = JarvisMemory(config.db_path)
         self.registry = build_default_registry(config, self.memory)
         self.session_mgr = JarvisLiveSession(
@@ -47,6 +90,11 @@ class JarvisBridge:
         self._detector: WakeWordDetector | None = None
         self._telemetry_paused: bool = False
         self._active_task: dict[str, Any] | None = None
+        self._pending_task_prompt: str = ""
+        self._audio_in: AudioInputStream | None = None
+        self._audio_out: AudioOutputStream | None = None
+        self._default_endpoints: tuple[str, str] = ("", "")
+        self._voice_mode: str = "wakeword"
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
         if not self._clients:
@@ -62,6 +110,8 @@ class JarvisBridge:
             self._clients.discard(ws)
 
     async def _set_state(self, state: str) -> None:
+        if state != self._state:
+            self.logger.info("state=%s", state)
         self._state = state
         await self._broadcast({"type": "state", "state": state})
 
@@ -90,18 +140,27 @@ class JarvisBridge:
             else:
                 title = f"Opened {raw_target}"
                 target = raw_target
-        elif name in {"write_file", "edit_file"}:
+        elif name in {"write_file", "edit_file", "create_document"}:
             kind = "file_edit"
-            path = str(args.get("path") or res.get("path") or "")
-            title = f"Updated file: {path}"
+            path = str(res.get("path") or args.get("path") or "")
+            verb = "Created document" if name == "create_document" else "Updated file"
+            title = f"{verb}: {path}"
             target = path
         elif name == "run_shell_command":
             kind = "command"
             cmd = str(args.get("command") or "")
             title = f"Ran command: {cmd[:70]}"
-        elif name in {"remember_fact", "manage_reminders"}:
+        elif name in {"remember_fact", "manage_reminders", "search_memory"}:
             kind = "memory"
-            title = "Updated synced memory" if name == "remember_fact" else "Updated reminders"
+            title = (
+                "Searched synced memory"
+                if name == "search_memory"
+                else ("Updated synced memory" if name == "remember_fact" else "Updated reminders")
+            )
+        elif name == "system_control":
+            kind = "system"
+            act = str(args.get("action") or res.get("action") or "")
+            title = f"System control: {act}" if act else "System control"
         return {
             "name": name,
             "kind": kind,
@@ -127,7 +186,7 @@ class JarvisBridge:
 
     async def _record_tool_action(self, payload: dict[str, Any]) -> None:
         if self._active_task is None:
-            await self._start_task("Voice / Background command")
+            await self._start_task(self._pending_task_prompt or "Voice / Background command")
         assert self._active_task is not None
         name = str(payload.get("name", "tool"))
         args = payload.get("args") or {}
@@ -158,17 +217,37 @@ class JarvisBridge:
         )
         await self._broadcast({"type": "task_event", "event": "updated", "task": self._active_task})
 
+    @staticmethod
+    def _summarize_actions(actions: list[dict[str, Any]], fallback_text: str) -> str:
+        done_titles = [
+            str(a.get("title", "")).strip()
+            for a in actions
+            if a.get("title")
+        ]
+        if done_titles:
+            joined = " · ".join(done_titles[:3])
+            if len(done_titles) > 3:
+                joined += f" (+{len(done_titles) - 3} more)"
+            return joined[:220]
+        cleaned = " ".join(fallback_text.split())
+        return cleaned[:180] + ("..." if len(cleaned) > 180 else "")
+
     async def _complete_task(self, summary: str) -> None:
+        self._pending_task_prompt = ""
         if self._active_task is None:
             return
         actions = list(self._active_task.get("actions") or [])
+        if not actions:
+            self._active_task = None
+            return
         has_error = any(a.get("status") == "error" for a in actions)
         final_status = "error" if has_error else "done"
+        concise_summary = self._summarize_actions(actions, summary)
         task = self.memory.upsert_task_run(
             task_id=self._active_task["task_id"],
             prompt=self._active_task["prompt"],
             status=final_status,
-            summary=summary.strip(),
+            summary=concise_summary,
             actions=actions,
         )
         self._active_task = None
@@ -176,7 +255,10 @@ class JarvisBridge:
 
     async def _on_session_event(self, payload: dict[str, Any]) -> None:
         if payload.get("type") == "state":
-            self._state = str(payload.get("state", self._state))
+            new_state = str(payload.get("state", self._state))
+            if new_state != self._state:
+                self.logger.info("state=%s", new_state)
+            self._state = new_state
         await self._broadcast(payload)
 
         ev_type = payload.get("type")
@@ -184,11 +266,17 @@ class JarvisBridge:
             role = str(payload.get("role", "")).lower()
             text = str(payload.get("text", "")).strip()
             if role in {"you", "user"} and text:
-                await self._start_task(text)
+                self._pending_task_prompt = text
             elif role == "jarvis" and text:
                 await self._complete_task(text)
             await self._broadcast(self.build_memory_snapshot())
         elif ev_type == "tool":
+            if payload.get("phase") == "done" and payload.get("status") == "rejected":
+                self.logger.warning(
+                    "Tool rejected (%s): %s",
+                    payload.get("name"),
+                    (payload.get("result") or {}).get("message", ""),
+                )
             await self._record_tool_action(payload)
         elif ev_type == "memory_updated":
             await self._broadcast(self.build_memory_snapshot())
@@ -225,64 +313,136 @@ class JarvisBridge:
         }
 
     async def _run_voice_loop(self, mode: str) -> None:
+        self._voice_mode = mode
         use_wakeword = mode == "wakeword"
-        audio_in = AudioInputStream(
-            sample_rate=self.config.input_sample_rate,
-            channels=self.config.audio_channels,
-            blocksize=self.config.input_chunk_samples,
-        )
+        refresh_audio_devices()
+        self._default_endpoints = get_windows_default_endpoints(ensure_mic_unmuted=True)
+        loop = asyncio.get_running_loop()
         audio_out = AudioOutputStream(
             sample_rate=self.config.output_sample_rate,
             channels=self.config.audio_channels,
         )
-        loop = asyncio.get_running_loop()
-        mic_queue = audio_in.start(loop)
-        audio_out.start()
-        self._outbound_text_queue = asyncio.Queue()
-        self._wake_event = asyncio.Event()
+
+        def _handle_barge_in() -> None:
+            audio_out.clear()
+            if self._state == "speaking":
+                loop.call_soon_threadsafe(lambda: asyncio.create_task(self._set_state("listening")))
+
+        audio_in = AudioInputStream(
+            sample_rate=self.config.input_sample_rate,
+            channels=self.config.audio_channels,
+            blocksize=self.config.input_chunk_samples,
+            device=None,
+            playback_ref=audio_out.playback_ref,
+            on_barge_in=_handle_barge_in,
+            barge_in_enabled=self.config.barge_in_enabled,
+        )
+        try:
+            mic_queue = audio_in.start(loop)
+            audio_out.start()
+            self._audio_in = audio_in
+            self._audio_out = audio_out
+        except Exception as exc:
+            self.logger.exception("Audio device startup error")
+            await self._broadcast({"type": "error", "message": f"Audio device error ({type(exc).__name__}: {exc})"})
+            audio_in.stop()
+            audio_out.stop()
+            await self._set_state("stopped")
+            return
 
         try:
-            if use_wakeword:
-                if self._detector is None:
-                    await self._set_state("loading_wakeword")
-                    detector = WakeWordDetector(
-                        model_name=self.config.wake_word_model,
-                        threshold=self.config.wake_threshold,
-                    )
-                    await asyncio.to_thread(detector.load)
+            if use_wakeword and self._detector is None:
+                await self._set_state("loading_wakeword")
+                detector = WakeWordDetector(
+                    model_name=self.config.wake_word_model,
+                    threshold=self.config.wake_threshold,
+                    consecutive_frames=self.config.wake_consecutive_frames,
+                )
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(detector.load), timeout=20.0)
                     self._detector = detector
+                except Exception as exc:
+                    reason = (
+                        "Wake word model timed out after 20s"
+                        if isinstance(exc, asyncio.TimeoutError)
+                        else f"Wake word failed to load ({type(exc).__name__}: {exc})"
+                    )
+                    await self._broadcast(
+                        {
+                            "type": "error",
+                            "message": f"{reason}. Falling back to direct voice & text mode.",
+                        }
+                    )
+                    use_wakeword = False
 
+            self._outbound_text_queue = asyncio.Queue()
+            self._wake_event = asyncio.Event()
+            consecutive_api_errors = 0
+
+            async def _drain_cooldown(cooldown_sec: float = 0.8) -> None:
+                deadline = loop.time() + cooldown_sec
+                while loop.time() < deadline:
+                    audio_in.drain()
+                    await asyncio.sleep(0.12)
+                    if not audio_out.is_playing and (deadline - loop.time()) < (cooldown_sec - 0.45):
+                        break
+                audio_in.drain()
+                reset_fn = getattr(audio_in, "reset_wake_state", None)
+                if callable(reset_fn):
+                    reset_fn()
+
+            async def _run_live_guarded(*, initial_prompt: str | None = None, wake_greeting: bool = False) -> None:
+                nonlocal consecutive_api_errors
+                try:
+                    reason = await self.session_mgr.run_voice_session(
+                        audio_in=audio_in,
+                        audio_out=audio_out,
+                        mic_queue=mic_queue,
+                        idle_timeout_sec=self.config.idle_timeout_sec,
+                        initial_prompt=initial_prompt,
+                        outbound_text_queue=self._outbound_text_queue,
+                        wake_greeting=wake_greeting,
+                    )
+                    consecutive_api_errors = 0
+                    self.logger.info("Voice session ended (reason=%s)", reason)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    consecutive_api_errors += 1
+                    self.session_mgr._resumption_handle = None
+                    raw = f"{type(exc).__name__}: {exc}"
+                    low = raw.lower()
+                    is_quota = "1011" in low or "exhausted" in low or "quota" in low or "429" in low
+                    self.logger.warning("Gemini Live error (attempt=%d, quota=%s): %s", consecutive_api_errors, is_quota, raw)
+                    friendly = (
+                        "Cuota o límite temporal de Gemini Live alcanzado (1011). Reintentando en modo espera..."
+                        if is_quota
+                        else raw
+                    )
+                    await self._broadcast({"type": "error", "message": friendly})
+                    await asyncio.sleep(min(12.0, 4.0 * consecutive_api_errors))
+
+            if use_wakeword:
+                assert self._detector is not None
                 while True:
                     await self._set_state("idle_wake")
+                    await _drain_cooldown(0.6)
                     self._detector.reset()
                     self._wake_event.clear()
-                    audio_in.drain()
 
                     while True:
                         if self._wake_event.is_set():
                             self._wake_event.clear()
+                            self.logger.info("Wake triggered (source=manual)")
                             await self._broadcast({"type": "wake", "model": "manual", "score": 1.0})
                             audio_in.drain()
-                            await self.session_mgr.run_voice_session(
-                                audio_in=audio_in,
-                                audio_out=audio_out,
-                                mic_queue=mic_queue,
-                                idle_timeout_sec=self.config.idle_timeout_sec,
-                                outbound_text_queue=self._outbound_text_queue,
-                            )
+                            await _run_live_guarded(wake_greeting=True)
                             break
 
                         # Allow typed text in the Desktop UI to wake Jarvis too
                         if not self._outbound_text_queue.empty():
                             initial = await self._outbound_text_queue.get()
-                            await self.session_mgr.run_voice_session(
-                                audio_in=audio_in,
-                                audio_out=audio_out,
-                                mic_queue=mic_queue,
-                                idle_timeout_sec=self.config.idle_timeout_sec,
-                                initial_prompt=initial,
-                                outbound_text_queue=self._outbound_text_queue,
-                            )
+                            await _run_live_guarded(initial_prompt=initial, wake_greeting=False)
                             break
 
                         try:
@@ -290,37 +450,67 @@ class JarvisBridge:
                         except asyncio.TimeoutError:
                             continue
 
-                        detected, score = self._detector.process_frame(frame)
+                        pop_fn = getattr(audio_in, "pop_wake_frame", None)
+                        wake_pair = pop_fn() if callable(pop_fn) else None
+                        if isinstance(wake_pair, tuple) and len(wake_pair) == 2:
+                            wake_frame, speech_active = wake_pair
+                        else:
+                            wake_frame, speech_active = frame, True
+
+                        detected, score = self._detector.process_frame(
+                            wake_frame,
+                            speech_active=bool(speech_active),
+                        )
                         if detected:
+                            self.logger.info(
+                                "Wake triggered (model=%s, score=%.3f)",
+                                self.config.wake_word_model,
+                                score,
+                            )
                             await self._broadcast(
                                 {"type": "wake", "model": self.config.wake_word_model, "score": score}
                             )
                             self._detector.reset()
                             audio_in.drain()
-                            await self.session_mgr.run_voice_session(
-                                audio_in=audio_in,
-                                audio_out=audio_out,
-                                mic_queue=mic_queue,
-                                idle_timeout_sec=self.config.idle_timeout_sec,
-                                outbound_text_queue=self._outbound_text_queue,
-                            )
+                            await _run_live_guarded(wake_greeting=True)
                             break
             else:
                 while True:
-                    reason = await self.session_mgr.run_voice_session(
-                        audio_in=audio_in,
-                        audio_out=audio_out,
-                        mic_queue=mic_queue,
-                        idle_timeout_sec=None,
-                        outbound_text_queue=self._outbound_text_queue,
-                    )
-                    if reason != "go_away":
-                        break
+                    try:
+                        reason = await self.session_mgr.run_voice_session(
+                            audio_in=audio_in,
+                            audio_out=audio_out,
+                            mic_queue=mic_queue,
+                            idle_timeout_sec=None,
+                            outbound_text_queue=self._outbound_text_queue,
+                        )
+                        consecutive_api_errors = 0
+                        if reason != "go_away":
+                            break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        consecutive_api_errors += 1
+                        self.session_mgr._resumption_handle = None
+                        raw = f"{type(exc).__name__}: {exc}"
+                        low = raw.lower()
+                        is_quota = "1011" in low or "exhausted" in low or "quota" in low or "429" in low
+                        friendly = (
+                            "Cuota o límite temporal de Gemini Live alcanzado (1011). Reconectando..."
+                            if is_quota
+                            else raw
+                        )
+                        await self._broadcast({"type": "error", "message": friendly})
+                        if consecutive_api_errors >= 3:
+                            break
+                        await asyncio.sleep(min(12.0, 4.0 * consecutive_api_errors))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             await self._broadcast({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         finally:
+            self._audio_in = None
+            self._audio_out = None
             self._outbound_text_queue = None
             self._wake_event = None
             audio_in.stop()
@@ -431,6 +621,7 @@ class JarvisBridge:
                 on_event=self._on_session_event,
             )
             await self._broadcast({"type": "needs_api_key", "missing": False})
+            await self._broadcast({"type": "api_key_saved", "saved": True})
             if data.get("start_voice", True):
                 await self._stop_voice()
                 self._voice_task = asyncio.create_task(self._run_voice_loop("wakeword"))
@@ -460,6 +651,13 @@ class JarvisBridge:
                 asyncio.create_task(_deferred_wake())
         elif action == "stop_voice":
             await self._stop_voice()
+        elif action == "restart_voice":
+            self.logger.info("Manual voice loop restart requested (mode=%s)", self._voice_mode)
+            if not self.config.gemini_api_key:
+                await self._broadcast({"type": "needs_api_key", "missing": True})
+                return
+            await self._stop_voice()
+            self._voice_task = asyncio.create_task(self._run_voice_loop(self._voice_mode))
         elif action == "standby":
             if self._voice_task and not self._voice_task.done():
                 self.session_mgr.request_standby()
@@ -476,7 +674,7 @@ class JarvisBridge:
             text = str(data.get("text", "")).strip()
             if not text:
                 return
-            await self._start_task(text)
+            self._pending_task_prompt = text
             if self._outbound_text_queue is not None and self._voice_task and not self._voice_task.done():
                 await self._outbound_text_queue.put(text)
             else:
@@ -509,8 +707,57 @@ class JarvisBridge:
             if key and value:
                 self.memory.remember_fact(key=key, value=value, category=cat)
                 await self._broadcast(self.build_memory_snapshot())
+        elif action == "delete_fact":
+            key = str(data.get("key", "")).strip()
+            if key and self.memory.delete_fact(key):
+                await self._broadcast(self.build_memory_snapshot())
+        elif action == "get_settings":
+            await self._broadcast({"type": "settings_snapshot", "settings": self.config.get_public_settings()})
+        elif action == "save_settings":
+            raw_settings = data.get("settings")
+            if isinstance(raw_settings, dict):
+                prev_voice = self.config.voice_name
+                prev_silence = self.config.silence_duration_ms
+                prev_barge = self.config.barge_in_enabled
+                updated = self.config.save_settings(raw_settings)
+                if self._detector is not None:
+                    self._detector.threshold = self.config.wake_threshold
+                self.logger.info("Settings updated: %s", updated)
+                await self._broadcast({"type": "settings_saved", "settings": updated})
+                needs_restart = (
+                    updated["voice_name"] != prev_voice
+                    or updated["silence_duration_ms"] != prev_silence
+                    or updated["barge_in_enabled"] != prev_barge
+                )
+                if needs_restart and self._voice_task and not self._voice_task.done() and self.config.gemini_api_key:
+                    self.session_mgr._resumption_handle = None
+                    await self._stop_voice()
+                    self._voice_task = asyncio.create_task(self._run_voice_loop(self._voice_mode))
         elif action == "refresh_memory":
             await self._broadcast(self.build_memory_snapshot())
+        elif action == "refresh_devices":
+            if not (self._voice_task and not self._voice_task.done()):
+                refresh_audio_devices()
+            await self._broadcast(
+                {
+                    "type": "input_devices",
+                    "devices": list_input_devices(),
+                    "selected": self.config.input_device,
+                }
+            )
+        elif action == "set_input_device":
+            device = str(data.get("device", "")).strip()
+            self.config.save_input_device(device)
+            await self._broadcast(
+                {
+                    "type": "input_devices",
+                    "devices": list_input_devices(),
+                    "selected": self.config.input_device,
+                }
+            )
+            if self._voice_task and not self._voice_task.done() and self.config.gemini_api_key:
+                await self._stop_voice()
+                self._voice_task = asyncio.create_task(self._run_voice_loop(self._voice_mode))
         elif action == "set_telemetry_paused":
             paused = bool(data.get("paused", False))
             was_paused = self._telemetry_paused
@@ -523,7 +770,17 @@ class JarvisBridge:
         try:
             await ws.send(json.dumps({"type": "state", "state": self._state}))
             await ws.send(json.dumps({"type": "needs_api_key", "missing": not bool(self.config.gemini_api_key)}))
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "input_devices",
+                        "devices": list_input_devices(),
+                        "selected": self.config.input_device,
+                    }
+                )
+            )
             await ws.send(json.dumps(self.build_telemetry(), default=str))
+            await ws.send(json.dumps({"type": "settings_snapshot", "settings": self.config.get_public_settings()}))
             await ws.send(json.dumps(self.build_memory_snapshot(), default=str))
             async for message in ws:
                 if isinstance(message, str):
@@ -538,21 +795,78 @@ class JarvisBridge:
                 continue
             await self._broadcast(self.build_telemetry())
 
+    async def _check_due_reminders(self) -> None:
+        due = self.memory.claim_due_reminders()
+        if not due:
+            return
+        for rem in due:
+            self.logger.info("Reminder due #%d: %s (due_at=%s)", rem.id, rem.title, rem.due_at)
+            await self._broadcast({"type": "reminder_due", "reminder": asdict(rem)})
+        await self._broadcast(self.build_memory_snapshot())
+
+    async def _reminders_loop(self) -> None:
+        while True:
+            await asyncio.sleep(5.0)
+            try:
+                await self._check_due_reminders()
+            except Exception:
+                self.logger.exception("Error checking due reminders")
+
+    async def _mic_level_loop(self) -> None:
+        last_sent = -1
+        ticks = 0
+        while True:
+            await asyncio.sleep(0.15)
+            ticks += 1
+            if ticks >= 12 and self._audio_in is not None:
+                ticks = 0
+                cur_eps = get_windows_default_endpoints(ensure_mic_unmuted=False)
+                if cur_eps != ("", "") and self._default_endpoints != ("", "") and cur_eps != self._default_endpoints:
+                    self._default_endpoints = get_windows_default_endpoints(ensure_mic_unmuted=True)
+                    refresh_audio_devices()
+                    self.logger.info("Default Windows audio endpoints changed -> %s", self._default_endpoints)
+                    try:
+                        self._audio_in.reopen_on_default()
+                        if self._audio_out is not None:
+                            self._audio_out.reopen_on_default()
+                    except Exception:
+                        self.logger.exception("Failed reopening audio stream after endpoint switch")
+            if self._telemetry_paused or not self._clients:
+                continue
+            level = self._audio_in.level_percent if self._audio_in is not None else 0
+            if level != last_sent:
+                last_sent = level
+                await self._broadcast({"type": "mic_level", "level": level})
+
     async def run(self, auto_start_voice: bool = False) -> None:
         """Start the local WebSocket bridge server."""
         telemetry_task = asyncio.create_task(self._telemetry_loop())
+        mic_level_task = asyncio.create_task(self._mic_level_loop())
+        reminders_task = asyncio.create_task(self._reminders_loop())
         if auto_start_voice and self.config.gemini_api_key:
             self._voice_task = asyncio.create_task(self._run_voice_loop("wakeword"))
         try:
             async with serve(self._ws_handler, self.host, self.port):
+                self.logger.info("Jarvis bridge listening on ws://%s:%d (auto_voice=%s)", self.host, self.port, auto_start_voice)
                 print(f"Jarvis bridge listening on ws://{self.host}:{self.port}")
                 await asyncio.Future()
         finally:
             telemetry_task.cancel()
+            mic_level_task.cancel()
+            reminders_task.cancel()
             await self._stop_voice()
 
 
+def _configure_utf8_stdio() -> None:
+    """Prevent Windows cp1252 `UnicodeEncodeError` when printing transcripts/emojis."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            with contextlib.suppress(Exception):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main() -> int:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Jarvis Desktop Bridge")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)

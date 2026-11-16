@@ -27,6 +27,10 @@ def register_productivity_tools(
         facts = memory.recall_facts(query=query or None, limit=max(1, min(int(limit), 50)))
         return {"status": "ok", "facts": [asdict(f) for f in facts]}
 
+    def search_memory(query: str, limit: int = 5) -> dict[str, Any]:
+        res = memory.search_memory(query=query, limit=max(1, min(int(limit), 8)))
+        return {"status": "ok", "query": query.strip(), **res}
+
     def manage_reminders(
         action: str,
         title: str = "",
@@ -106,6 +110,21 @@ def register_productivity_tools(
                 },
             },
             handler=recall_facts,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="search_memory",
+            description="Full-text search across past conversations and stored user facts using SQLite FTS5.",
+            parameters={
+                "type": "OBJECT",
+                "properties": {
+                    "query": {"type": "STRING", "description": "Keywords or topic to look up in memory."},
+                    "limit": {"type": "INTEGER", "description": "Max items per category (1-8, default 5)."},
+                },
+                "required": ["query"],
+            },
+            handler=search_memory,
         )
     )
     registry.register(

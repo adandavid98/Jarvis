@@ -89,7 +89,11 @@ def register_developer_tools(registry: ToolRegistry, config: JarvisConfig) -> No
     def run_tests(target: str = "") -> dict[str, Any]:
         cmd = [sys.executable, "-m", "pytest", "-q"]
         if target.strip():
-            resolved = resolve_workspace_path(config.workspace_dir, target.strip(), allow_outside=False)
+            resolved = resolve_workspace_path(
+                config.workspace_dir,
+                target.strip(),
+                allow_outside=config.auto_approve_dangerous,
+            )
             cmd.append(str(resolved))
 
         completed = subprocess.run(
