@@ -853,6 +853,7 @@ class AudioOutputStream:
         self._lock = threading.Lock()
         self._stream: sd.OutputStream | None = None
         self._last_audio_time: float = 0.0
+        self._output_level_percent: int = 0
 
     def _callback(
         self,
@@ -877,7 +878,12 @@ class AudioOutputStream:
         samples = np.frombuffer(chunk, dtype=np.int16).reshape(frames, self.channels)
         outdata[:] = samples
         if available > 0:
-            self.playback_ref.push_24k(samples[:, 0], source_rate=self.sample_rate)
+            mono = samples[:, 0]
+            rms = float(np.sqrt(np.mean(mono.astype(np.float32) ** 2)))
+            self._output_level_percent = min(100, int((rms / 4500.0) * 100))
+            self.playback_ref.push_24k(mono, source_rate=self.sample_rate)
+        else:
+            self._output_level_percent = 0
 
     def _open_portaudio_stream(self) -> sd.OutputStream:
         wasapi_idx = get_wasapi_default_device("output")
@@ -937,7 +943,13 @@ class AudioOutputStream:
         """Immediately discard queued playback audio (used on user interruption)."""
         with self._lock:
             self._buffer.clear()
+        self._output_level_percent = 0
         self.playback_ref.clear()
+
+    @property
+    def level_percent(self) -> int:
+        """Current output speech level (0-100) while playback is active."""
+        return self._output_level_percent if self.is_playing else 0
 
     @property
     def is_playing(self) -> bool:

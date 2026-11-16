@@ -1218,3 +1218,20 @@ def test_coding_agent_executes_tools_and_respects_step_cap(tmp_path: Path, monke
     assert "Created app.py cleanly." in res["summary"]
 
 
+def test_audio_output_stream_live_level_percent() -> None:
+    import numpy as np
+    from jarvis.audio import AudioOutputStream
+
+    out = AudioOutputStream(sample_rate=24000, channels=1)
+    assert out.level_percent == 0
+
+    tone = (np.ones(960, dtype=np.int16) * 4500).tobytes()
+    out.enqueue(tone)
+    buf = np.zeros((960, 1), dtype=np.int16)
+    out._callback(buf, 960, None, None)
+    assert out.level_percent > 50
+
+    out.clear()
+    assert out.level_percent == 0
+
+

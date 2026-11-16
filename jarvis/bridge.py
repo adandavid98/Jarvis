@@ -859,11 +859,12 @@ class JarvisBridge:
 
     async def _mic_level_loop(self) -> None:
         last_sent = -1
+        last_out_sent = -1
         ticks = 0
         while True:
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.25 if self._telemetry_paused else 0.08)
             ticks += 1
-            if ticks >= 12 and self._audio_in is not None:
+            if ticks >= 20 and self._audio_in is not None:
                 ticks = 0
                 cur_eps = get_windows_default_endpoints(ensure_mic_unmuted=False)
                 if cur_eps != ("", "") and self._default_endpoints != ("", "") and cur_eps != self._default_endpoints:
@@ -879,9 +880,11 @@ class JarvisBridge:
             if self._telemetry_paused or not self._clients:
                 continue
             level = self._audio_in.level_percent if self._audio_in is not None else 0
-            if level != last_sent:
+            out_level = self._audio_out.level_percent if self._audio_out is not None else 0
+            if level != last_sent or out_level != last_out_sent:
                 last_sent = level
-                await self._broadcast({"type": "mic_level", "level": level})
+                last_out_sent = out_level
+                await self._broadcast({"type": "mic_level", "level": level, "output_level": out_level})
 
     async def run(self, auto_start_voice: bool = False) -> None:
         """Start the local WebSocket bridge server."""

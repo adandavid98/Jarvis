@@ -24,10 +24,10 @@ html, body {
   height: 76px;
   margin: 4px;
   padding: 10px 14px;
-  border-radius: 6px;
-  background: rgba(3, 12, 22, 0.94);
-  border: 1px solid rgba(56, 217, 255, 0.5);
-  box-shadow: 0 0 22px rgba(56, 217, 255, 0.25), inset 0 0 18px rgba(0, 157, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(4, 8, 12, 0.92);
+  border: 1px solid rgba(0, 238, 255, 0.35);
+  box-shadow: 0 0 26px rgba(0, 238, 255, 0.22), inset 0 0 18px rgba(0, 157, 255, 0.08);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -40,6 +40,7 @@ html, body {
   height: 8px;
   border-style: solid;
   border-color: var(--cyan);
+  opacity: 0.55;
   pointer-events: none;
 }
 
@@ -48,47 +49,18 @@ html, body {
 
 .orb-wrap {
   position: relative;
-  width: 42px;
-  height: 42px;
+  width: 52px;
+  height: 52px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.orb-ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 1.5px dashed rgba(56, 217, 255, 0.55);
-  animation: ov-spin 8s linear infinite;
-}
-
-.orb {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  border: 1.5px solid var(--cyan);
-  background: radial-gradient(circle, rgba(56, 217, 255, 0.65), rgba(0, 157, 255, 0.16));
-  box-shadow: 0 0 14px rgba(56, 217, 255, 0.6);
-  transition: all 0.2s ease;
-}
-
-.orb.tool_running,
-.orb.thinking {
-  border-color: var(--amber);
-  background: radial-gradient(circle, rgba(255, 176, 32, 0.72), rgba(255, 176, 32, 0.16));
-  box-shadow: 0 0 16px rgba(255, 176, 32, 0.65);
-}
-
-.orb.stopped,
-.orb.offline {
-  border-color: var(--danger);
-  box-shadow: 0 0 10px rgba(255, 59, 107, 0.45);
-}
-
-@keyframes ov-spin {
-  to { transform: rotate(360deg); }
+#ov-canvas {
+  width: 52px;
+  height: 52px;
+  display: block;
 }
 
 .content {

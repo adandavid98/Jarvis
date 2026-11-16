@@ -33,6 +33,10 @@ const reactorCanvas = document.getElementById('reactor-canvas');
 const btnSfx = document.getElementById('btn-sfx');
 const btnLogs = document.getElementById('btn-logs');
 const btnWorkspace = document.getElementById('btn-workspace');
+const appShell = document.getElementById('app-shell');
+const btnViewMode = document.getElementById('btn-view-mode');
+const liveSubtitle = document.getElementById('live-subtitle');
+const liveSubtitleText = document.getElementById('live-subtitle-text');
 const cpuArc = document.getElementById('cpu-arc');
 const ramArc = document.getElementById('ram-arc');
 const RADIAL_CIRC = 175.93;
@@ -112,124 +116,52 @@ function setRadialGauge(arcEl, pct) {
   arcEl.classList.toggle('warn', clamped >= 85);
 }
 
-function drawArcReactor(ts) {
-  reactorRaf = null;
-  if (!windowVisible || !reactorCanvas) return;
-  const dt = lastFrameTs ? Math.min(0.05, (ts - lastFrameTs) / 1000) : 0.016;
-  lastFrameTs = ts;
+const orbEngine = window.createJarvisOrbEngine
+  ? window.createJarvisOrbEngine(reactorCanvas, { particleCount: 580, haloLayers: 4 })
+  : null;
+let coreMode = false;
+let subtitleHideTimer = null;
 
-  const dpr = window.devicePixelRatio || 1;
-  const cssSize = 172;
-  if (reactorCanvas.width !== cssSize * dpr) {
-    reactorCanvas.width = cssSize * dpr;
-    reactorCanvas.height = cssSize * dpr;
+function setCoreMode(enabled) {
+  coreMode = Boolean(enabled);
+  if (appShell) appShell.classList.toggle('core-mode', coreMode);
+  if (btnViewMode) {
+    btnViewMode.textContent = coreMode ? 'HUD VIEW' : 'CORE VIEW';
+    btnViewMode.classList.toggle('active', coreMode);
   }
-  const ctx = reactorCanvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, cssSize, cssSize);
-
-  const cx = cssSize / 2;
-  const cy = cssSize / 2;
-  const isBusy = currentHudState === 'tool_running' || currentHudState === 'thinking';
-  const isSpeaking = currentHudState === 'speaking';
-  const isListening = currentHudState === 'listening';
-  const isOffline = currentHudState === 'stopped' || currentHudState === 'offline' || currentHudState === 'needs_key';
-
-  const speed = isBusy ? 1.85 : isSpeaking ? 1.45 : isListening ? 1.05 : isOffline ? 0.15 : 0.45;
-  reactorAngle = (reactorAngle + dt * speed) % (Math.PI * 20);
-  smoothMicLevel += (targetMicLevel - smoothMicLevel) * Math.min(1, dt * 12);
-
-  const primary = isBusy ? '255, 176, 32' : isOffline ? '255, 59, 107' : '56, 217, 255';
-  const accent = isBusy ? '255, 212, 102' : '0, 157, 255';
-
-  // Outer reticle ticks
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.rotate(reactorAngle * 0.25);
-  for (let i = 0; i < 36; i++) {
-    const a = (i / 36) * Math.PI * 2;
-    const major = i % 3 === 0;
-    const r0 = major ? 76 : 78;
-    const r1 = 83;
-    ctx.beginPath();
-    ctx.moveTo(Math.cos(a) * r0, Math.sin(a) * r0);
-    ctx.lineTo(Math.cos(a) * r1, Math.sin(a) * r1);
-    ctx.strokeStyle = `rgba(${primary}, ${major ? 0.55 : 0.22})`;
-    ctx.lineWidth = major ? 1.5 : 1;
-    ctx.stroke();
+  if (!coreMode && viewerOpenState) {
+    requestAnimationFrame(() => syncViewerBounds());
   }
-  ctx.restore();
+}
 
-  // Outer segmented Stark ring (clockwise)
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.rotate(reactorAngle * 0.7);
-  ctx.lineWidth = 2.5;
-  ctx.strokeStyle = `rgba(${primary}, 0.72)`;
-  for (let s = 0; s < 4; s++) {
-    const start = s * (Math.PI / 2) + 0.14;
-    ctx.beginPath();
-    ctx.arc(0, 0, 70, start, start + Math.PI / 2 - 0.34);
-    ctx.stroke();
+if (btnViewMode) {
+  btnViewMode.onclick = () => setCoreMode(!coreMode);
+}
+
+function showLiveSubtitle(role, text, isFinal = false) {
+  if (!liveSubtitle || !liveSubtitleText) return;
+  const clean = String(text || '').trim();
+  if (!clean) return;
+  liveSubtitleText.textContent = role === 'user' ? `You: ${clean}` : clean;
+  liveSubtitle.classList.toggle('user-voice', role === 'user');
+  liveSubtitle.classList.remove('hidden');
+  if (subtitleHideTimer) clearTimeout(subtitleHideTimer);
+  if (isFinal) {
+    subtitleHideTimer = setTimeout(() => {
+      if (currentHudState === 'idle_wake' || currentHudState === 'stopped') {
+        liveSubtitle.classList.add('hidden');
+      }
+    }, 6500);
   }
-  ctx.restore();
-
-  // Inner counter-rotating dashed arc ring
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.rotate(-reactorAngle * 1.15);
-  ctx.lineWidth = 2;
-  ctx.setLineDash([7, 5]);
-  ctx.strokeStyle = `rgba(${accent}, 0.65)`;
-  ctx.beginPath();
-  ctx.arc(0, 0, 56, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.restore();
-
-  // Voice spectrum / harmonic radial bars
-  const barCount = 44;
-  const energyBase = isSpeaking
-    ? 0.45 + 0.32 * Math.sin(ts * 0.011)
-    : isListening
-      ? Math.max(0.12, smoothMicLevel / 100)
-      : isBusy
-        ? 0.36
-        : 0.08;
-  ctx.save();
-  ctx.translate(cx, cy);
-  for (let i = 0; i < barCount; i++) {
-    const a = (i / barCount) * Math.PI * 2 - Math.PI / 2;
-    const wave = isSpeaking
-      ? 0.5 + 0.5 * Math.sin(ts * 0.015 + i * 0.65)
-      : isListening
-        ? 0.35 + 0.65 * Math.abs(Math.sin(ts * 0.012 + i * 0.42))
-        : 0.4 + 0.6 * Math.abs(Math.sin(ts * 0.004 + i * 0.5));
-    const len = 3 + energyBase * 13 * wave;
-    const r0 = 49;
-    const r1 = r0 + len;
-    ctx.beginPath();
-    ctx.moveTo(Math.cos(a) * r0, Math.sin(a) * r0);
-    ctx.lineTo(Math.cos(a) * r1, Math.sin(a) * r1);
-    ctx.strokeStyle = `rgba(${primary}, ${0.32 + energyBase * 0.6})`;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  reactorRaf = requestAnimationFrame(drawArcReactor);
 }
 
 function setReactorVisibility(visible) {
   windowVisible = Boolean(visible) && !document.hidden;
   if (windowVisible) {
     updateHudClock();
-    if (!reactorRaf) {
-      lastFrameTs = 0;
-      reactorRaf = requestAnimationFrame(drawArcReactor);
-    }
-  } else if (reactorRaf) {
-    cancelAnimationFrame(reactorRaf);
-    reactorRaf = null;
+    orbEngine?.start();
+  } else {
+    orbEngine?.stop();
   }
 }
 
@@ -432,6 +364,7 @@ function syncViewerBounds() {
 }
 
 function openViewer(url) {
+  if (coreMode) setCoreMode(false);
   hudLayout?.classList.add('viewer-active');
   viewerPane.classList.remove('hidden');
   viewerResizer.classList.remove('hidden');
@@ -654,6 +587,7 @@ function setState(state) {
   const prev = currentHudState;
   currentHudState = String(state || 'stopped');
   orb.className = `orb-core ${currentHudState}`;
+  orbEngine?.setState(currentHudState);
   const meta = STATE_META[currentHudState] || {
     label: currentHudState.replace('_', ' ').toUpperCase(),
     sub: 'TACTICAL LINK ACTIVE',
@@ -851,6 +785,7 @@ function connectBridge() {
     } else if (data.type === 'mic_level') {
       targetMicLevel = Math.max(0, Math.min(100, Number(data.level || 0)));
       if (micBar) micBar.style.width = `${targetMicLevel}%`;
+      orbEngine?.setAudio({ mic: targetMicLevel, output: Number(data.output_level || 0) });
     } else if (data.type === 'telemetry') {
       document.getElementById('cpu-val').textContent = `${data.cpu_percent}%`;
       document.getElementById('cpu-bar').style.width = `${Math.min(100, data.cpu_percent)}%`;
@@ -879,7 +814,9 @@ function connectBridge() {
     } else if (data.type === 'memory_snapshot') {
       renderMemory(data);
     } else if (data.type === 'transcript') {
-      appendMessage(data.role === 'user' ? 'user' : 'jarvis', data.text, !data.final);
+      const role = data.role === 'user' ? 'user' : 'jarvis';
+      appendMessage(role, data.text, !data.final);
+      showLiveSubtitle(role, data.text, Boolean(data.final));
     } else if (data.type === 'tool') {
       addToolLog(data);
       if (data.phase === 'end' && data.status === 'ok') playHudSfx('done');
