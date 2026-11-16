@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import re
 import time
 from typing import Any, Callable
 
@@ -28,7 +29,27 @@ Guidelines:
 - When the user shares a preference or recurring detail worth keeping, proactively save it with `remember_fact`.
 - When a tool returns `status: "needs_confirmation"`, ask the user clearly for confirmation before re-invoking it with `confirmed=true` or `overwrite=true`.
 - If you are unsure about a destructive change, ask first.
+- NEVER call `enter_standby` unless the user explicitly asks to go to sleep, enter standby, pause/stop listening, or says goodbye — never call it on incomplete phrases or conversational pauses.
+- Recent conversation history in system context is past-session reference only. Do NOT assume incomplete old fragments are still active unless the user resumes them, and if you only catch a tiny stray noise/word like "¿Qué?" or "y" after wake-up, just ask briefly how you can help instead of inventing an unrequested response.
 """
+
+_STANDBY_PHRASE_RE = re.compile(
+    r"\b("
+    r"stand\s?by|go\s+to\s+sleep|sleep\s+mode|stop\s+listening|that'?s\s+all|bye|goodbye|"
+    r"modo\s+espera|descansa|duerme|du[eé]rmete|vete\s+a\s+dormir|deja\s+de\s+escuchar|"
+    r"eso\s+es\s+todo|nada\s+m[aá]s|adi[oó]s|chao|hasta\s+luego|nos\s+vemos|silencio|c[aá]llate"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def _explicit_standby_requested(text: str) -> bool:
+    """Return True only if `text` contains an explicit user command to enter standby/sleep."""
+    return bool(_STANDBY_PHRASE_RE.search(text or ""))
 
 EventCallback = Callable[[dict[str, Any]], Any]
 
@@ -65,6 +86,15 @@ class JarvisLiveSession:
         )
         self._resumption_handle: str | None = None
         self._standby_event: asyncio.Event | None = None
+        self._recent_user_utterances: list[tuple[float, str]] = []
+
+    def _record_user_utterance(self, text: str) -> None:
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        self._recent_user_utterances.append((_monotonic(), cleaned))
+        if len(self._recent_user_utterances) > 12:
+            del self._recent_user_utterances[:-12]
 
     def request_standby(self) -> None:
         """Signal the active voice session to exit back to idle wake-word mode."""
@@ -155,6 +185,15 @@ class JarvisLiveSession:
         print(f"\n[tool] -> {call.name}({args})")
         await self._emit({"type": "tool", "phase": "start", "name": call.name, "args": args})
         result = await self.registry.execute(call.name, args)
+        if call.name == "enter_standby" and result.get("standby"):
+            now = _monotonic()
+            recent_text = " ".join(t for ts, t in self._recent_user_utterances if (now - ts) <= 20.0)
+            if not _explicit_standby_requested(recent_text):
+                result = {
+                    "status": "rejected",
+                    "standby": False,
+                    "message": "User did not ask to enter standby. Stay in listening mode.",
+                }
         status = str(result.get("status", "ok"))
         print(f"[tool] <- {call.name}: {status}")
         await self._emit(
@@ -202,11 +241,13 @@ class JarvisLiveSession:
     ) -> str:
         """Run one bidirectional audio session until idle timeout, GoAway, or cancellation."""
         live_config = self.build_live_config(text_only=False)
-        last_activity = time.monotonic()
+        last_activity = _monotonic()
+        last_meaningful_activity = last_activity
         interaction_status = "IDLE"
         turn_idle = True
         active_tasks: set[asyncio.Task[None]] = set()
         end_reason = "closed"
+        self._recent_user_utterances.clear()
 
         await self._emit({"type": "state", "state": "listening"})
 
@@ -232,6 +273,7 @@ class JarvisLiveSession:
         ) as session:
             greeting_state_task: asyncio.Task[None] | None = None
             if initial_prompt:
+                self._record_user_utterance(initial_prompt)
                 self.memory.log_message("user", initial_prompt, source="desktop")
                 await self._emit({"type": "transcript", "role": "user", "text": initial_prompt, "final": True})
                 await session.send_realtime_input(text=initial_prompt)
@@ -241,11 +283,16 @@ class JarvisLiveSession:
                 await self._emit(
                     {"type": "transcript", "role": "jarvis", "text": "Hola, ¿cómo te ayudo?", "final": True}
                 )
-                last_activity = time.monotonic()
+                last_activity = _monotonic()
+                last_meaningful_activity = last_activity
 
                 async def _reset_state_after_greeting() -> None:
+                    nonlocal last_activity, last_meaningful_activity
                     while audio_out.is_playing:
                         await asyncio.sleep(0.1)
+                    now = _monotonic()
+                    last_activity = now
+                    last_meaningful_activity = now
                     await self._emit({"type": "state", "state": "listening"})
 
                 greeting_state_task = asyncio.create_task(_reset_state_after_greeting())
@@ -280,7 +327,7 @@ class JarvisLiveSession:
 
                     if speech_active:
                         was_streaming_speech = True
-                        last_activity = time.monotonic()
+                        last_activity = _monotonic()
                         await session.send_realtime_input(
                             audio=types.Blob(
                                 data=frame.tobytes(),
@@ -292,20 +339,23 @@ class JarvisLiveSession:
                         await session.send_realtime_input(audio_stream_end=True)
 
             async def _send_text_loop() -> None:
-                nonlocal last_activity
+                nonlocal last_activity, last_meaningful_activity
                 if outbound_text_queue is None:
                     return
                 while True:
                     text = await outbound_text_queue.get()
                     if not text.strip():
                         continue
-                    last_activity = time.monotonic()
+                    now = _monotonic()
+                    last_activity = now
+                    last_meaningful_activity = now
+                    self._record_user_utterance(text)
                     self.memory.log_message("user", text, source="desktop")
                     await self._emit({"type": "transcript", "role": "user", "text": text, "final": True})
                     await session.send_realtime_input(text=text)
 
             async def _receive_loop() -> None:
-                nonlocal last_activity, interaction_status, turn_idle, end_reason, recording_greeting
+                nonlocal last_activity, last_meaningful_activity, interaction_status, turn_idle, end_reason, recording_greeting
                 active_speaker: str | None = None
                 turn_buffers: dict[str, list[str]] = {"You": [], "Jarvis": []}
 
@@ -345,7 +395,7 @@ class JarvisLiveSession:
                     received_any = False
                     async for message in session.receive():
                         received_any = True
-                        last_activity = time.monotonic()
+                        last_activity = _monotonic()
 
                         status = _extract_interaction_status(message)
                         if status is not None and status != "INTERACTION_STATUS_UNSPECIFIED":
@@ -368,11 +418,17 @@ class JarvisLiveSession:
                                 audio_out.clear()
                                 turn_idle = True
                                 recording_greeting = False
+                                now = _monotonic()
+                                last_activity = now
+                                last_meaningful_activity = now
                                 await _flush_speaker(active_speaker)
                                 await self._emit({"type": "state", "state": "listening"})
 
                             if content.model_turn and content.model_turn.parts:
                                 turn_idle = False
+                                now = _monotonic()
+                                last_activity = now
+                                last_meaningful_activity = now
                                 for part in content.model_turn.parts:
                                     if part.inline_data and part.inline_data.data:
                                         if recording_greeting:
@@ -381,16 +437,23 @@ class JarvisLiveSession:
                                         await self._emit({"type": "state", "state": "speaking"})
 
                             if content.input_transcription and content.input_transcription.text:
-                                last_activity = time.monotonic()
+                                now = _monotonic()
+                                last_activity = now
+                                last_meaningful_activity = now
+                                self._record_user_utterance(content.input_transcription.text)
                                 await _print_tx("You", content.input_transcription.text)
 
                             if content.output_transcription and content.output_transcription.text:
-                                last_activity = time.monotonic()
+                                now = _monotonic()
+                                last_activity = now
+                                last_meaningful_activity = now
                                 await _print_tx("Jarvis", content.output_transcription.text)
 
                             if content.turn_complete:
                                 turn_idle = True
-                                last_activity = time.monotonic()
+                                now = _monotonic()
+                                last_activity = now
+                                last_meaningful_activity = now
                                 if recording_greeting:
                                     recording_greeting = False
                                     if len(greeting_pcm) > 8000:
@@ -401,7 +464,9 @@ class JarvisLiveSession:
 
                         if message.tool_call and message.tool_call.function_calls:
                             turn_idle = False
-                            last_activity = time.monotonic()
+                            now = _monotonic()
+                            last_activity = now
+                            last_meaningful_activity = now
                             await _flush_speaker(active_speaker)
                             await self._emit({"type": "state", "state": "tool_running"})
                             for call in message.tool_call.function_calls:
@@ -419,11 +484,15 @@ class JarvisLiveSession:
                     return
                 while True:
                     await asyncio.sleep(1.0)
+                    now = _monotonic()
                     if (
                         (interaction_status == "IDLE" or turn_idle)
                         and not audio_out.is_playing
                         and not active_tasks
-                        and (time.monotonic() - last_activity) >= idle_timeout_sec
+                        and (
+                            (now - last_activity) >= idle_timeout_sec
+                            or (now - last_meaningful_activity) >= (idle_timeout_sec + 5.0)
+                        )
                     ):
                         end_reason = "idle_timeout"
                         return

@@ -972,10 +972,118 @@ def test_configure_utf8_stdio_handles_cp1252_unencodable() -> None:
     assert "Jarvis listo" in decoded
 
 
+def test_standby_guard_and_idle_watchdog_hard_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    import numpy as np
+    from jarvis.audio import AudioInputStream
+    from jarvis.config import JarvisConfig
+    from jarvis.live_session import JarvisLiveSession
+    from jarvis.memory import JarvisMemory
+    from jarvis.tools import build_default_registry
 
+    # 1. Verify AudioInputStream reset_wake_state clears wake envelope & hangover
+    stream = AudioInputStream(sample_rate=16000, channels=1, blocksize=1280)
+    stream._wake_env_rms = 999.0
+    stream._hangover = 7
+    stream.is_speech_active = True
+    stream.reset_wake_state()
+    assert stream._wake_env_rms == 250.0
+    assert stream._hangover == 0
+    assert stream.is_speech_active is False
 
+    # 2. Verify enter_standby is rejected unless user explicitly asked for standby/sleep/goodbye
+    cfg = JarvisConfig(gemini_api_key="dummy-key", db_path=tmp_path / "m.db", data_dir=tmp_path)
+    mem = JarvisMemory(cfg.db_path)
+    reg = build_default_registry(cfg, mem)
+    session_mgr = JarvisLiveSession(cfg, mem, reg)
+    standby_ev = asyncio.Event()
+    session_mgr._standby_event = standby_ev
 
+    sent_tool_responses: list[object] = []
 
+    class _MockToolSession:
+        async def send_tool_response(self, *, function_responses):
+            sent_tool_responses.extend(function_responses)
 
+    async def exercise_standby_guard() -> None:
+        mock_sess = _MockToolSession()
+        call = SimpleNamespace(id="c1", name="enter_standby", args={})
 
+        session_mgr._record_user_utterance("editarla entonces si yo por ejemplo la edito")
+        await session_mgr._execute_and_respond(mock_sess, call)
+        assert not standby_ev.is_set()
+        assert sent_tool_responses[-1].response["status"] == "rejected"
+
+        session_mgr._record_user_utterance("Jarvis, eso es todo, descansa")
+        await session_mgr._execute_and_respond(mock_sess, call)
+        assert standby_ev.is_set()
+        assert sent_tool_responses[-1].response["status"] == "ok"
+
+    asyncio.run(exercise_standby_guard())
+
+    # 3. Verify noisy speech_active blips cannot keep session stuck past idle_timeout_sec + 5.0
+    class _SilentGeminiSession:
+        async def send_realtime_input(self, **kwargs: object) -> None:
+            pass
+
+        async def send_client_content(self, **kwargs: object) -> None:
+            pass
+
+        async def receive(self):
+            while True:
+                await asyncio.sleep(0.05)
+                if False:
+                    yield None
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            @asynccontextmanager
+            async def _connect(**kwargs: object):
+                yield _SilentGeminiSession()
+
+            self.aio = SimpleNamespace(live=SimpleNamespace(connect=_connect))
+
+    session_mgr2 = JarvisLiveSession(cfg, mem, reg)
+    session_mgr2._client = _FakeClient()  # type: ignore[assignment]
+
+    fake_clock = [1000.0]
+    monkeypatch.setattr("jarvis.live_session._monotonic", lambda: fake_clock[0])
+
+    class _NoisyAudioIn:
+        is_speech_active = True
+
+        def drain(self) -> None:
+            pass
+
+    class _IdleAudioOut:
+        is_playing = False
+
+        def enqueue(self, pcm: bytes) -> None:
+            pass
+
+        def clear(self) -> None:
+            pass
+
+    async def exercise_idle_cap() -> str:
+        mic_q: asyncio.Queue[np.ndarray] = asyncio.Queue()
+
+        async def _noise_loop() -> None:
+            for step in range(12):
+                fake_clock[0] += 1.0
+                await mic_q.put(np.ones(1280, dtype=np.int16) * 50)
+                await asyncio.sleep(0.05)
+
+        feeder = asyncio.create_task(_noise_loop())
+        reason = await session_mgr2.run_voice_session(
+            _NoisyAudioIn(),  # type: ignore[arg-type]
+            _IdleAudioOut(),  # type: ignore[arg-type]
+            mic_q,
+            idle_timeout_sec=2.0,
+        )
+        feeder.cancel()
+        return reason
+
+    assert asyncio.run(exercise_idle_cap()) == "idle_timeout"
 

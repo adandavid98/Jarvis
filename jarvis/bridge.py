@@ -255,7 +255,10 @@ class JarvisBridge:
 
     async def _on_session_event(self, payload: dict[str, Any]) -> None:
         if payload.get("type") == "state":
-            self._state = str(payload.get("state", self._state))
+            new_state = str(payload.get("state", self._state))
+            if new_state != self._state:
+                self.logger.info("state=%s", new_state)
+            self._state = new_state
         await self._broadcast(payload)
 
         ev_type = payload.get("type")
@@ -268,6 +271,12 @@ class JarvisBridge:
                 await self._complete_task(text)
             await self._broadcast(self.build_memory_snapshot())
         elif ev_type == "tool":
+            if payload.get("phase") == "done" and payload.get("status") == "rejected":
+                self.logger.warning(
+                    "Tool rejected (%s): %s",
+                    payload.get("name"),
+                    (payload.get("result") or {}).get("message", ""),
+                )
             await self._record_tool_action(payload)
         elif ev_type == "memory_updated":
             await self._broadcast(self.build_memory_snapshot())
@@ -370,19 +379,22 @@ class JarvisBridge:
             self._wake_event = asyncio.Event()
             consecutive_api_errors = 0
 
-            async def _drain_cooldown(cooldown_sec: float = 1.6) -> None:
+            async def _drain_cooldown(cooldown_sec: float = 0.8) -> None:
                 deadline = loop.time() + cooldown_sec
                 while loop.time() < deadline:
                     audio_in.drain()
-                    await asyncio.sleep(0.15)
-                    if not audio_out.is_playing and (deadline - loop.time()) < (cooldown_sec - 0.8):
+                    await asyncio.sleep(0.12)
+                    if not audio_out.is_playing and (deadline - loop.time()) < (cooldown_sec - 0.45):
                         break
                 audio_in.drain()
+                reset_fn = getattr(audio_in, "reset_wake_state", None)
+                if callable(reset_fn):
+                    reset_fn()
 
             async def _run_live_guarded(*, initial_prompt: str | None = None, wake_greeting: bool = False) -> None:
                 nonlocal consecutive_api_errors
                 try:
-                    await self.session_mgr.run_voice_session(
+                    reason = await self.session_mgr.run_voice_session(
                         audio_in=audio_in,
                         audio_out=audio_out,
                         mic_queue=mic_queue,
@@ -392,6 +404,7 @@ class JarvisBridge:
                         wake_greeting=wake_greeting,
                     )
                     consecutive_api_errors = 0
+                    self.logger.info("Voice session ended (reason=%s)", reason)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -413,13 +426,14 @@ class JarvisBridge:
                 assert self._detector is not None
                 while True:
                     await self._set_state("idle_wake")
-                    await _drain_cooldown(1.2)
+                    await _drain_cooldown(0.6)
                     self._detector.reset()
                     self._wake_event.clear()
 
                     while True:
                         if self._wake_event.is_set():
                             self._wake_event.clear()
+                            self.logger.info("Wake triggered (source=manual)")
                             await self._broadcast({"type": "wake", "model": "manual", "score": 1.0})
                             audio_in.drain()
                             await _run_live_guarded(wake_greeting=True)
@@ -448,6 +462,11 @@ class JarvisBridge:
                             speech_active=bool(speech_active),
                         )
                         if detected:
+                            self.logger.info(
+                                "Wake triggered (model=%s, score=%.3f)",
+                                self.config.wake_word_model,
+                                score,
+                            )
                             await self._broadcast(
                                 {"type": "wake", "model": self.config.wake_word_model, "score": score}
                             )

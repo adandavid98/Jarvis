@@ -13,8 +13,8 @@ class WakeWordDetector:
         model_name: str = "hey_jarvis",
         threshold: float = 0.50,
         consecutive_frames: int = 2,
-        instant_threshold: float = 0.78,
-        min_voice_rms: float = 160.0,
+        instant_threshold: float = 0.88,
+        min_voice_rms: float = 210.0,
     ) -> None:
         self.model_name = model_name
         self.threshold = threshold

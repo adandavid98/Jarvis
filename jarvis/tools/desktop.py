@@ -399,8 +399,13 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             "snippets": snippets,
         }
 
-    def enter_standby() -> dict[str, Any]:
-        return {"status": "ok", "standby": True, "message": "Returning to idle wake-word standby."}
+    def enter_standby(reason: str = "") -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "standby": True,
+            "reason": reason.strip(),
+            "message": "Returning to idle wake-word standby.",
+        }
 
     def _send_win_vk(vk_code: int, taps: int = 1) -> None:
         if os.name != "nt":
@@ -556,8 +561,20 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
     registry.register(
         ToolSpec(
             name="enter_standby",
-            description="Return Jarvis to idle wake-word standby (listening only for 'Hey Jarvis') when the user says goodbye, 'that is all', 'standby', or 'go to sleep'.",
-            parameters={"type": "OBJECT", "properties": {}},
+            description=(
+                "ONLY call when the user explicitly commands Jarvis to go to sleep, enter standby, "
+                "stop listening, or says goodbye (e.g. 'standby', 'go to sleep', 'descansa', 'adiós', "
+                "'eso es todo'). NEVER call during unfinished sentences, pauses, or unrelated requests."
+            ),
+            parameters={
+                "type": "OBJECT",
+                "properties": {
+                    "reason": {
+                        "type": "STRING",
+                        "description": "Exact short user phrase requesting standby/goodbye.",
+                    }
+                },
+            },
             handler=enter_standby,
         )
     )

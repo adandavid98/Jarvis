@@ -562,12 +562,22 @@ function sendCmd(payload) {
   }
 }
 
+document.getElementById('btn-wake-now').onclick = () =>
+  sendCmd({ action: 'wake_now' });
 document.getElementById('btn-wakeword').onclick = () =>
   sendCmd({ action: 'start_voice', mode: 'wakeword' });
 document.getElementById('btn-direct').onclick = () =>
   sendCmd({ action: 'start_voice', mode: 'direct' });
 document.getElementById('btn-stop').onclick = () =>
   sendCmd({ action: 'stop_voice' });
+
+orb.onclick = () => {
+  if (currentHudState === 'listening' || currentHudState === 'speaking') {
+    sendCmd({ action: 'standby' });
+  } else {
+    sendCmd({ action: 'wake_now' });
+  }
+};
 
 chatForm.addEventListener('submit', (e) => {
   e.preventDefault();

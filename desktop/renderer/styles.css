@@ -464,6 +464,7 @@ html, body {
   width: 94px;
   height: 94px;
   border-radius: 50%;
+  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;

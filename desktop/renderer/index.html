@@ -107,13 +107,14 @@
 
         <div class="orb-stage">
           <canvas id="reactor-canvas" width="220" height="220"></canvas>
-          <div class="orb-core" id="jarvis-orb">
+          <div class="orb-core" id="jarvis-orb" title="Click Arc Reactor to Wake / Standby">
             <span id="state-label">CONNECTING</span>
           </div>
         </div>
 
         <div class="voice-controls">
-          <button class="ctrl-btn primary" id="btn-wakeword">WAKE WORD ("HEY JARVIS")</button>
+          <button class="ctrl-btn primary" id="btn-wake-now">LISTEN NOW</button>
+          <button class="ctrl-btn" id="btn-wakeword">WAKE WORD ("HEY JARVIS")</button>
           <button class="ctrl-btn" id="btn-direct">DIRECT VOICE</button>
           <button class="ctrl-btn danger" id="btn-stop">MUTE / STOP</button>
         </div>

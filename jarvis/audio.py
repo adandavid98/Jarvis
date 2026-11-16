@@ -409,6 +409,8 @@ class AudioInputStream:
         self._peak_streak: int = 0
         self._pre_roll: collections.deque[np.ndarray] = collections.deque(maxlen=3)
         self._pending_preroll: list[np.ndarray] = []
+        self._wake_pre_roll: collections.deque[np.ndarray] = collections.deque(maxlen=3)
+        self._pending_wake_preroll: list[np.ndarray] = []
 
         # Full-duplex AEC & barge-in confirmation (2 consecutive frames = 160ms)
         self._aec = EchoCanceller()
@@ -529,8 +531,8 @@ class AudioInputStream:
             elif self._hangover == 0 and f_rms < self._noise_rms * 1.25:
                 self._noise_rms = float(np.clip(0.85 * self._noise_rms + 0.15 * f_rms, 20.0, 1200.0))
 
-        is_sustained = barge_in_now or (f_rms > max(70.0, self._noise_rms * 1.45))
-        has_spike = (f_pk > max(260.0, self._noise_rms * 5.8)) or (w_pk > max(260.0, self._noise_rms * 5.8))
+        is_sustained = barge_in_now or (f_rms > max(95.0, self._noise_rms * 1.75))
+        has_spike = (f_pk > max(280.0, self._noise_rms * 6.0)) or (w_pk > max(280.0, self._noise_rms * 6.0))
         if has_spike and not is_sustained:
             self._peak_streak += 1
         elif is_sustained:
@@ -540,7 +542,7 @@ class AudioInputStream:
 
         is_voice = is_sustained or (self._peak_streak >= 2)
         if is_voice:
-            self._hangover = 15  # 1.2s hangover preserves clauses & soft pauses between words
+            self._hangover = 10  # 800ms hangover preserves clauses while letting idle timeout trigger reliably
             target_gain = float(np.clip(9500.0 / max(100.0, f_pk), 1.2, 9.0))
             self._env_gain = 0.45 * self._env_gain + 0.55 * target_gain
             excess = max(0.0, f_rms - self._noise_rms * 1.35)
@@ -550,7 +552,7 @@ class AudioInputStream:
             )
         elif self._hangover > 0:
             self._hangover -= 1
-            # Gentle hold during 1.2s hangover so mid-sentence pauses aren't chopped
+            # Gentle hold during hangover so mid-sentence pauses aren't chopped
             self._env_gain = max(1.0, self._env_gain * 0.96)
             self._last_voice_level = max(0, int(self._last_voice_level * 0.72))
         else:
@@ -561,6 +563,13 @@ class AudioInputStream:
         self.is_speech_active = active
 
         if active:
+            if is_voice:
+                clamped_w = float(np.clip(w_rms, 180.0, 2600.0))
+                if clamped_w > self._wake_env_rms:
+                    self._wake_env_rms = 0.85 * self._wake_env_rms + 0.15 * clamped_w
+                else:
+                    self._wake_env_rms = 0.96 * self._wake_env_rms + 0.04 * clamped_w
+            w_slow_gain = float(np.clip(1800.0 / max(180.0, self._wake_env_rms), 1.0, 3.8))
             if not was_active and self._pre_roll:
                 # Emit up to 240ms of pre-roll frames so initial consonants are never clipped
                 roll_gain = max(1.2, min(4.5, self._env_gain * 0.8))
@@ -568,18 +577,18 @@ class AudioInputStream:
                     np.clip(buf * roll_gain, -32768.0, 32767.0).astype(np.int16)
                     for buf in self._pre_roll
                 ]
+                self._pending_wake_preroll = [
+                    np.clip(buf * w_slow_gain, -32768.0, 32767.0).astype(np.int16)
+                    for buf in self._wake_pre_roll
+                ]
                 self._pre_roll.clear()
+                self._wake_pre_roll.clear()
             voice_out = np.clip(hp_flat * self._env_gain, -32768.0, 32767.0).astype(np.int16)
-            # Slow prosody-preserving envelope for openWakeWord (boosts Hey Jarvis to ~0.99 without noise pumping)
-            if w_rms > self._wake_env_rms:
-                self._wake_env_rms = 0.85 * self._wake_env_rms + 0.15 * w_rms
-            else:
-                self._wake_env_rms = 0.96 * self._wake_env_rms + 0.04 * w_rms
-            w_slow_gain = float(np.clip(1800.0 / max(150.0, self._wake_env_rms), 1.0, 4.5))
             wake_out = np.clip(wake16 * w_slow_gain, -32768.0, 32767.0).astype(np.int16)
             self.last_peak = int(np.max(np.abs(voice_out)))
         else:
             self._pre_roll.append(hp_flat)
+            self._wake_pre_roll.append(wake16)
             self.last_peak = 0
             voice_out = np.zeros(len(hp_flat), dtype=np.int16)
             wake_out = voice_out
@@ -610,8 +619,12 @@ class AudioInputStream:
 
         voice_out, wake_out, active = self._process_dual_branch(chunk)
         preroll = self._pending_preroll
+        wake_preroll = self._pending_wake_preroll
         self._pending_preroll = []
-        self._loop.call_soon_threadsafe(self._enqueue_batch, preroll, voice_out, wake_out, active)
+        self._pending_wake_preroll = []
+        self._loop.call_soon_threadsafe(
+            self._enqueue_batch, preroll, wake_preroll, voice_out, wake_out, active
+        )
 
     @property
     def level_percent(self) -> int:
@@ -634,15 +647,25 @@ class AudioInputStream:
     def _enqueue_batch(
         self,
         preroll: list[np.ndarray],
+        wake_preroll: list[np.ndarray],
         voice_out: np.ndarray,
         wake_out: np.ndarray,
         active: bool,
     ) -> None:
-        for pre in preroll:
+        for idx, pre in enumerate(preroll):
             self._enqueue_nonblocking(pre)
-            self._wake_queue.append((pre, True))
+            w_pre = wake_preroll[idx] if idx < len(wake_preroll) else pre
+            self._wake_queue.append((w_pre, True))
         self._enqueue_nonblocking(voice_out)
         self._wake_queue.append((wake_out, active))
+
+    def reset_wake_state(self) -> None:
+        """Reset wake envelope/hangover state when returning to wake-word standby."""
+        self._wake_env_rms = 250.0
+        self._hangover = 0
+        self._peak_streak = 0
+        self._last_voice_level = 0
+        self.is_speech_active = False
 
     def pop_wake_frame(self) -> tuple[np.ndarray, bool] | None:
         """Pop the wake-word-optimized frame paired with the latest `mic_queue` item."""
@@ -665,6 +688,8 @@ class AudioInputStream:
         self._barge_in_streak = 0
         self._pre_roll.clear()
         self._pending_preroll.clear()
+        self._wake_pre_roll.clear()
+        self._pending_wake_preroll.clear()
         self._wake_queue.clear()
         self._aec.reset()
 
@@ -784,6 +809,8 @@ class AudioInputStream:
         self._wake_queue.clear()
         self._pending_preroll.clear()
         self._pre_roll.clear()
+        self._pending_wake_preroll.clear()
+        self._wake_pre_roll.clear()
         if self._queue is None:
             return
         while not self._queue.empty():
