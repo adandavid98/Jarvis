@@ -19,6 +19,7 @@ import psutil
 
 from jarvis.config import JarvisConfig
 from jarvis.tools._paths import resolve_workspace_path
+from jarvis.tools.documents import generate_document_file
 from jarvis.tools.registry import ToolRegistry, ToolSpec
 
 _DANGEROUS_PATTERNS = [
@@ -236,6 +237,13 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
         title: str = "",
         content: str = "",
         overwrite: bool = False,
+        style: str = "standard",
+        subtitle: str = "",
+        author: str = "",
+        institution: str = "",
+        course: str = "",
+        date: str = "",
+        references: list[str] | None = None,
     ) -> dict[str, Any]:
         target = resolve_workspace_path(
             config.workspace_dir,
@@ -249,60 +257,18 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
                 "message": "File already exists. Ask user to confirm overwriting, then pass overwrite=true.",
             }
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        ext = target.suffix.lower()
-        clean_title = title.strip()
-
-        if ext == ".pdf":
-            from fpdf import FPDF
-
-            pdf = FPDF()
-            pdf.set_auto_page_break(auto=True, margin=15)
-            pdf.add_page()
-
-            font_family = "Helvetica"
-            unicode_font = Path(r"C:\Windows\Fonts\arial.ttf")
-            if unicode_font.exists():
-                pdf.add_font("ArialUnicode", "", str(unicode_font))
-                bold_font = Path(r"C:\Windows\Fonts\arialbd.ttf")
-                if bold_font.exists():
-                    pdf.add_font("ArialUnicode", "B", str(bold_font))
-                font_family = "ArialUnicode"
-
-            if clean_title:
-                pdf.set_font(font_family, "B" if font_family != "ArialUnicode" or Path(r"C:\Windows\Fonts\arialbd.ttf").exists() else "", 16)
-                pdf.multi_cell(0, 9, clean_title)
-                pdf.ln(3)
-
-            pdf.set_font(font_family, "", 11)
-            for paragraph in content.splitlines():
-                if paragraph.strip():
-                    pdf.multi_cell(0, 6.5, paragraph)
-                else:
-                    pdf.ln(4)
-            pdf.output(str(target))
-        elif ext == ".docx":
-            from docx import Document
-
-            doc = Document()
-            if clean_title:
-                doc.add_heading(clean_title, level=1)
-            for paragraph in content.splitlines():
-                if paragraph.strip():
-                    doc.add_paragraph(paragraph)
-            doc.save(str(target))
-        else:
-            full_text = f"# {clean_title}\n\n{content}" if (clean_title and ext == ".md") else (
-                f"{clean_title}\n\n{content}" if clean_title else content
-            )
-            target.write_text(full_text, encoding="utf-8")
-
-        return {
-            "status": "ok",
-            "path": str(target),
-            "format": ext.lstrip(".") or "txt",
-            "bytes_written": target.stat().st_size,
-        }
+        return generate_document_file(
+            target,
+            content=content,
+            title=title,
+            subtitle=subtitle,
+            author=author,
+            institution=institution,
+            course=course,
+            date=date,
+            style=style,
+            references=references,
+        )
 
     _TAG_RE = re.compile(r"<[^>]+>")
     _DDG_LINK_RE = re.compile(r'<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.I | re.S)
@@ -708,13 +674,24 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
     registry.register(
         ToolSpec(
             name="create_document",
-            description="Create a formatted document (.pdf, .docx, .md, .txt, .html) at any path such as Downloads, Desktop, or Documents.",
+            description="Create a formatted document (.pdf, .docx, .md, .txt, .html) supporting Markdown headings, tables, lists, bold/italic, and academic styles (standard, apa, ieee, report).",
             parameters={
                 "type": "OBJECT",
                 "properties": {
                     "path": {"type": "STRING", "description": "Output file path ending in .pdf, .docx, .md, .txt, or .html."},
-                    "title": {"type": "STRING", "description": "Optional document heading/title."},
-                    "content": {"type": "STRING", "description": "Full body text of the document."},
+                    "title": {"type": "STRING", "description": "Document title."},
+                    "content": {"type": "STRING", "description": "Full Markdown or plain body text (supports # headings, **bold**, *italic*, bullet/numbered lists, and | pipe tables |)."},
+                    "style": {"type": "STRING", "description": "Formatting style: 'standard', 'apa' (Times New Roman 12pt, double-spaced, 1-in margins, cover & page numbers), 'ieee', or 'report'."},
+                    "subtitle": {"type": "STRING", "description": "Optional subtitle."},
+                    "author": {"type": "STRING", "description": "Optional author name for cover header."},
+                    "institution": {"type": "STRING", "description": "Optional university/organization name."},
+                    "course": {"type": "STRING", "description": "Optional course or department name."},
+                    "date": {"type": "STRING", "description": "Optional date string."},
+                    "references": {
+                        "type": "ARRAY",
+                        "items": {"type": "STRING"},
+                        "description": "Optional list of bibliography/reference entries.",
+                    },
                     "overwrite": {"type": "BOOLEAN", "description": "Set true to overwrite an existing file."},
                 },
                 "required": ["path", "content"],

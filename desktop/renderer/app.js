@@ -32,6 +32,7 @@ const stateSub = document.getElementById('state-sub');
 const reactorCanvas = document.getElementById('reactor-canvas');
 const btnSfx = document.getElementById('btn-sfx');
 const btnLogs = document.getElementById('btn-logs');
+const btnWorkspace = document.getElementById('btn-workspace');
 const cpuArc = document.getElementById('cpu-arc');
 const ramArc = document.getElementById('ram-arc');
 const RADIAL_CIRC = 175.93;
@@ -267,7 +268,42 @@ const setIdleSec = document.getElementById('set-idle-sec');
 const setIdleVal = document.getElementById('set-idle-val');
 const setBargeIn = document.getElementById('set-barge-in');
 const setAutoApprove = document.getElementById('set-auto-approve');
+const setWorkspace = document.getElementById('set-workspace');
+const btnBrowseWs = document.getElementById('btn-browse-ws');
 const reminderDue = document.getElementById('reminder-due');
+
+function updateWorkspaceBadge(wsPath) {
+  if (!wsPath) return;
+  const parts = String(wsPath).replaceAll('/', '\\').split('\\').filter(Boolean);
+  const folder = parts[parts.length - 1] || wsPath;
+  if (btnWorkspace) {
+    btnWorkspace.textContent = `WS: ${folder.slice(0, 16)}`;
+    btnWorkspace.title = `Active Workspace: ${wsPath} (click to switch)`;
+  }
+  if (setWorkspace && document.activeElement !== setWorkspace) {
+    setWorkspace.value = wsPath;
+  }
+}
+
+if (btnWorkspace && window.jarvisDesktop.pickWorkspaceFolder) {
+  btnWorkspace.onclick = async () => {
+    const picked = await window.jarvisDesktop.pickWorkspaceFolder();
+    if (picked) {
+      updateWorkspaceBadge(picked);
+      sendCmd({ action: 'set_workspace', path: picked });
+      playHudSfx('done');
+    }
+  };
+}
+
+if (btnBrowseWs && window.jarvisDesktop.pickWorkspaceFolder) {
+  btnBrowseWs.onclick = async () => {
+    const picked = await window.jarvisDesktop.pickWorkspaceFolder();
+    if (picked && setWorkspace) {
+      setWorkspace.value = picked;
+    }
+  };
+}
 
 function applySettingsToForm(s) {
   if (!s) return;
@@ -289,6 +325,9 @@ function applySettingsToForm(s) {
   }
   if (setAutoApprove && s.auto_approve_dangerous !== undefined) {
     setAutoApprove.checked = Boolean(s.auto_approve_dangerous);
+  }
+  if (s.workspace_dir) {
+    updateWorkspaceBadge(s.workspace_dir);
   }
 }
 
@@ -331,6 +370,7 @@ if (settingsForm) {
         idle_timeout_sec: Number(setIdleSec?.value || 15),
         barge_in_enabled: Boolean(setBargeIn?.checked),
         auto_approve_dangerous: Boolean(setAutoApprove?.checked),
+        workspace_dir: setWorkspace?.value?.trim() || undefined,
       },
     });
     settingsModal?.classList.add('hidden');
@@ -562,8 +602,6 @@ function sendCmd(payload) {
   }
 }
 
-document.getElementById('btn-wake-now').onclick = () =>
-  sendCmd({ action: 'wake_now' });
 document.getElementById('btn-wakeword').onclick = () =>
   sendCmd({ action: 'start_voice', mode: 'wakeword' });
 document.getElementById('btn-direct').onclick = () =>
@@ -825,6 +863,7 @@ function connectBridge() {
         ? `${data.battery.percent}%${data.battery.plugged_in ? ' ⚡' : ''}`
         : 'AC';
       if (data.model) modelBadge.textContent = data.model.toUpperCase();
+      if (data.workspace_dir) updateWorkspaceBadge(data.workspace_dir);
     } else if (data.type === 'settings_snapshot') {
       applySettingsToForm(data.settings);
     } else if (data.type === 'settings_saved') {

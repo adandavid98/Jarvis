@@ -142,6 +142,15 @@ class JarvisConfig:
         self.input_device = cleaned
         return target
 
+    def save_workspace_dir(self, path: str | Path) -> Path:
+        """Validate, persist `JARVIS_WORKSPACE_DIR`, and update workspace_dir in-memory."""
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.exists() or not resolved.is_dir():
+            raise ValueError(f"Workspace directory does not exist: {resolved}")
+        self._save_env_var("JARVIS_WORKSPACE_DIR", str(resolved))
+        self.workspace_dir = resolved
+        return resolved
+
     def get_public_settings(self) -> dict[str, Any]:
         """Return user-tunable runtime settings safe to expose to the Desktop HUD."""
         return {
@@ -152,6 +161,7 @@ class JarvisConfig:
             "barge_in_enabled": bool(self.barge_in_enabled),
             "auto_approve_dangerous": bool(self.auto_approve_dangerous),
             "input_device": self.input_device,
+            "workspace_dir": str(self.workspace_dir),
         }
 
     def save_settings(self, updates: dict[str, Any]) -> dict[str, Any]:
@@ -186,6 +196,9 @@ class JarvisConfig:
             auto_ok = bool(updates["auto_approve_dangerous"])
             self._save_env_var("JARVIS_AUTO_APPROVE_DANGEROUS", "true" if auto_ok else "false")
             self.auto_approve_dangerous = auto_ok
+
+        if "workspace_dir" in updates and str(updates["workspace_dir"]).strip():
+            self.save_workspace_dir(str(updates["workspace_dir"]).strip())
 
         return self.get_public_settings()
 

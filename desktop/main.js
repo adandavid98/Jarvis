@@ -326,6 +326,15 @@ ipcMain.on('overlay:expand', () => {
   mainWindow?.focus();
 });
 ipcMain.on('overlay:hide', () => overlayWindow?.hide());
+ipcMain.handle('dialog:pick-folder', async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  const res = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Jarvis Workspace Folder',
+    properties: ['openDirectory'],
+  });
+  if (res.canceled || !res.filePaths?.length) return null;
+  return res.filePaths[0];
+});
 ipcMain.on('jarvis:wake', () => showOverlay());
 ipcMain.on('jarvis:state', (_ev, state) => {
   if (state === 'listening' || state === 'speaking' || state === 'tool_running' || state === 'thinking') {

@@ -41,8 +41,12 @@ if (Test-Path $DistBridge) {
     --collect-all onnxruntime `
     --collect-all sounddevice `
     --hidden-import jarvis.tools.desktop `
+    --hidden-import jarvis.tools.documents `
+    --hidden-import jarvis.tools.research `
+    --hidden-import jarvis.tools.coding_agent `
     --hidden-import jarvis.tools.productivity `
     --hidden-import jarvis.tools.developer `
+    --hidden-import pypdf `
     (Join-Path $RootDir "jarvis\bridge.py")
 
 if ($LASTEXITCODE -ne 0) {

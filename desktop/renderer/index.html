@@ -23,6 +23,7 @@
         <span class="hud-clock" id="hud-clock">00:00:00</span>
       </div>
       <div class="window-controls">
+        <button id="btn-workspace" class="pill-ctrl" title="Change Active Workspace Folder">WS: ...</button>
         <button id="btn-sfx" class="pill-ctrl" title="Toggle HUD Sound Effects">SFX: ON</button>
         <button id="btn-logs" title="Open Bridge Logs Folder">LOGS</button>
         <button id="btn-update" title="Check for Updates">↻</button>
@@ -113,8 +114,7 @@
         </div>
 
         <div class="voice-controls">
-          <button class="ctrl-btn primary" id="btn-wake-now">LISTEN NOW</button>
-          <button class="ctrl-btn" id="btn-wakeword">WAKE WORD ("HEY JARVIS")</button>
+          <button class="ctrl-btn primary" id="btn-wakeword">WAKE WORD ("HEY JARVIS")</button>
           <button class="ctrl-btn" id="btn-direct">DIRECT VOICE</button>
           <button class="ctrl-btn danger" id="btn-stop">MUTE / STOP</button>
         </div>
@@ -259,6 +259,14 @@
             <span class="setting-val" id="set-idle-val">15 s</span>
           </div>
           <input type="range" id="set-idle-sec" min="5" max="60" step="5" value="15" />
+        </div>
+
+        <div class="setting-row">
+          <label for="set-workspace">Active Workspace Folder</label>
+          <div class="chat-form" style="margin-top:0;">
+            <input type="text" id="set-workspace" placeholder="C:\Users\...\Projects" autocomplete="off" />
+            <button type="button" class="ctrl-btn" id="btn-browse-ws">BROWSE</button>
+          </div>
         </div>
 
         <label class="setting-toggle">

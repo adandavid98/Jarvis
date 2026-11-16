@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('jarvisDesktop', {
   notifyReminder: (reminder) => ipcRenderer.send('reminder:notify', reminder),
   checkUpdates: () => ipcRenderer.send('app:check-updates'),
   openLogsFolder: () => ipcRenderer.send('app:open-logs'),
+  pickWorkspaceFolder: () => ipcRenderer.invoke('dialog:pick-folder'),
   restartBridge: () => ipcRenderer.send('bridge:restart'),
   onWindowVisibility: (cb) => {
     const handler = (_ev, visible) => cb(Boolean(visible));

@@ -131,6 +131,22 @@ class JarvisBridge:
             q = args.get("query") or res.get("query") or ""
             title = f"Searched web: {q}" if q else "Web search"
             target = str(res.get("viewer_url") or "")
+        elif name == "fetch_web_page":
+            kind = "open_url"
+            u = str(res.get("url") or args.get("url") or "")
+            title = f"Read web page: {res.get('title') or u}"
+            target = str(res.get("viewer_url") or u)
+        elif name == "read_pdf":
+            kind = "file_edit"
+            p = str(res.get("path") or args.get("path") or "")
+            title = f"Read PDF: {p}"
+            target = p
+        elif name == "run_coding_agent":
+            kind = "command"
+            t = str(args.get("task") or "")
+            changed = res.get("files_changed") or []
+            suffix = f" ({len(changed)} files)" if changed else ""
+            title = f"Coding Agent{suffix}: {t[:65]}"
         elif name == "open_application_or_url":
             raw_target = str(args.get("target") or res.get("opened") or "")
             if raw_target.lower().startswith(("http://", "https://")) or res.get("viewer_url"):
@@ -310,6 +326,7 @@ class JarvisBridge:
                 else None
             ),
             "model": self.config.model,
+            "workspace_dir": str(self.config.workspace_dir),
         }
 
     async def _run_voice_loop(self, mode: str) -> None:
@@ -719,7 +736,16 @@ class JarvisBridge:
                 prev_voice = self.config.voice_name
                 prev_silence = self.config.silence_duration_ms
                 prev_barge = self.config.barge_in_enabled
-                updated = self.config.save_settings(raw_settings)
+                prev_ws = self.config.workspace_dir
+                try:
+                    updated = self.config.save_settings(raw_settings)
+                except ValueError as exc:
+                    await self._broadcast({"type": "error", "message": str(exc)})
+                    return
+                if self.config.workspace_dir != prev_ws:
+                    self.registry = build_default_registry(self.config, self.memory)
+                    self.session_mgr.registry = self.registry
+                    await self._broadcast(self.build_telemetry())
                 if self._detector is not None:
                     self._detector.threshold = self.config.wake_threshold
                 self.logger.info("Settings updated: %s", updated)
@@ -728,11 +754,30 @@ class JarvisBridge:
                     updated["voice_name"] != prev_voice
                     or updated["silence_duration_ms"] != prev_silence
                     or updated["barge_in_enabled"] != prev_barge
+                    or self.config.workspace_dir != prev_ws
                 )
                 if needs_restart and self._voice_task and not self._voice_task.done() and self.config.gemini_api_key:
                     self.session_mgr._resumption_handle = None
                     await self._stop_voice()
                     self._voice_task = asyncio.create_task(self._run_voice_loop(self._voice_mode))
+        elif action == "set_workspace":
+            ws_path = str(data.get("path", "")).strip()
+            if not ws_path:
+                return
+            try:
+                self.config.save_workspace_dir(ws_path)
+            except ValueError as exc:
+                await self._broadcast({"type": "error", "message": str(exc)})
+                return
+            self.registry = build_default_registry(self.config, self.memory)
+            self.session_mgr.registry = self.registry
+            self.logger.info("Workspace updated: %s", self.config.workspace_dir)
+            await self._broadcast({"type": "settings_saved", "settings": self.config.get_public_settings()})
+            await self._broadcast(self.build_telemetry())
+            if self._voice_task and not self._voice_task.done() and self.config.gemini_api_key:
+                self.session_mgr._resumption_handle = None
+                await self._stop_voice()
+                self._voice_task = asyncio.create_task(self._run_voice_loop(self._voice_mode))
         elif action == "refresh_memory":
             await self._broadcast(self.build_memory_snapshot())
         elif action == "refresh_devices":

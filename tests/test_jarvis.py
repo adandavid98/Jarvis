@@ -1087,3 +1087,134 @@ def test_standby_guard_and_idle_watchdog_hard_cap(tmp_path: Path, monkeypatch: p
 
     assert asyncio.run(exercise_idle_cap()) == "idle_timeout"
 
+
+def test_workspace_switch_academic_docs_and_research_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    ws_a = tmp_path / "ws_a"
+    ws_b = tmp_path / "ws_b"
+    ws_a.mkdir()
+    ws_b.mkdir()
+
+    cfg = JarvisConfig(
+        gemini_api_key="test-key",
+        data_dir=tmp_path / "data",
+        db_path=tmp_path / "data" / "jarvis.db",
+        workspace_dir=ws_a,
+        auto_approve_dangerous=True,
+    )
+    updated = cfg.save_settings({"workspace_dir": str(ws_b)})
+    assert Path(updated["workspace_dir"]) == ws_b.resolve()
+    assert cfg.workspace_dir == ws_b.resolve()
+
+    mem = JarvisMemory(cfg.db_path)
+    reg = build_default_registry(cfg, mem)
+    assert "run_coding_agent" in reg.names()
+    assert "fetch_web_page" in reg.names()
+    assert "read_pdf" in reg.names()
+
+    async def run() -> None:
+        md_body = (
+            "# Introducción\n\n"
+            "Este ensayo incluye **negritas**, *cursivas* y `código`.\n\n"
+            "- Punto clave uno\n"
+            "- Punto clave dos\n\n"
+            "| Métrica | Valor |\n| --- | --- |\n| Precisión | 98% |\n"
+        )
+        docx_res = await reg.execute(
+            "create_document",
+            {
+                "path": "ensayo_apa.docx",
+                "title": "Impacto de la IA en Educación",
+                "subtitle": "Estudio comparativo",
+                "author": "Adán David",
+                "institution": "Universidad Nacional",
+                "course": "Metodología",
+                "date": "2026",
+                "style": "apa",
+                "content": md_body,
+                "references": ["Russell, S., & Norvig, P. (2021). Artificial Intelligence."],
+            },
+        )
+        assert docx_res["status"] == "ok"
+        assert docx_res["style"] == "apa"
+        assert (ws_b / "ensayo_apa.docx").exists()
+
+        pdf_res = await reg.execute(
+            "create_document",
+            {
+                "path": "ensayo_apa.pdf",
+                "title": "Informe PDF APA",
+                "author": "Adán David",
+                "style": "apa",
+                "content": md_body,
+                "references": ["Vaswani, A. et al. (2017). Attention Is All You Need."],
+            },
+        )
+        assert pdf_res["status"] == "ok"
+        pdf_read = await reg.execute("read_pdf", {"path": "ensayo_apa.pdf", "max_pages": 5})
+        assert pdf_read["status"] == "ok"
+        assert "Informe PDF APA" in pdf_read["content"]
+        assert "negritas" in pdf_read["content"]
+
+        fake_html = "<html><head><title>Doc Test</title><script>var x=1;</script></head><body><h1>Hello</h1><p>World content</p></body></html>"
+        mock_resp = MagicMock(status_code=200, text=fake_html, url="https://example.com/article")
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.get.return_value = mock_resp
+
+        with patch("jarvis.tools.research.httpx.AsyncClient", return_value=mock_client):
+            web_res = await reg.execute("fetch_web_page", {"url": "https://example.com/article", "max_chars": 1000})
+        assert web_res["status"] == "ok"
+        assert web_res["title"] == "Doc Test"
+        assert "var x=1" not in web_res["content"]
+        assert "World content" in web_res["content"]
+
+    asyncio.run(run())
+
+
+def test_coding_agent_executes_tools_and_respects_step_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    cfg = JarvisConfig(
+        gemini_api_key="test-key",
+        data_dir=tmp_path / "data",
+        db_path=tmp_path / "data" / "jarvis.db",
+        workspace_dir=tmp_path,
+        auto_approve_dangerous=True,
+    )
+    mem = JarvisMemory(cfg.db_path)
+    reg = build_default_registry(cfg, mem)
+
+    call_count = {"n": 0}
+
+    class _FakeModels:
+        async def generate_content(self, **_kwargs: Any) -> Any:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                fn = SimpleNamespace(name="write_file", args={"path": "app.py", "content": "print('ok')\n"})
+                return SimpleNamespace(
+                    candidates=[SimpleNamespace(content=SimpleNamespace(role="model", parts=[]))],
+                    function_calls=[fn],
+                    text="",
+                )
+            return SimpleNamespace(
+                candidates=[SimpleNamespace(content=SimpleNamespace(role="model", parts=[]))],
+                function_calls=[],
+                text="Created app.py cleanly.",
+            )
+
+    class _FakeGenAIClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.aio = SimpleNamespace(models=_FakeModels())
+
+    monkeypatch.setattr("jarvis.tools.coding_agent.genai.Client", _FakeGenAIClient)
+
+    res = asyncio.run(reg.execute("run_coding_agent", {"task": "Create app.py", "max_steps": 4}))
+    assert res["status"] == "ok"
+    assert res["steps"] == 2
+    assert any(p.endswith("app.py") for p in res["files_changed"])
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "print('ok')\n"
+    assert "Created app.py cleanly." in res["summary"]
+
+
