@@ -71,11 +71,22 @@
         rafId = null;
         return;
       }
+      if (typeof document !== 'undefined' && document.hidden) {
+        rafId = requestAnimationFrame(drawFrame);
+        return;
+      }
       const isSpeaking = state === 'speaking';
       const isListening = state === 'listening';
       const isBusy = state === 'tool_running' || state === 'thinking';
       const isStopped = state === 'stopped' || state === 'offline' || state === 'needs_key';
-      const minFrameMs = (isSpeaking || isListening || isBusy) ? 32 : 64;
+      const isStandby = state === 'idle_wake';
+      const minFrameMs = (isSpeaking || isListening || isBusy)
+        ? 32
+        : isStopped
+          ? 180
+          : isStandby
+            ? 80
+            : 64;
       if (lastRenderTs && (ts - lastRenderTs) < minFrameMs) {
         rafId = requestAnimationFrame(drawFrame);
         return;

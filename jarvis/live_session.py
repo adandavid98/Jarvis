@@ -34,7 +34,10 @@ Guidelines:
 - When a tool returns `status: "needs_confirmation"`, ask the user clearly for confirmation before re-invoking it with `confirmed=true` or `overwrite=true`.
 - If you are unsure about a destructive change, ask first.
 - NEVER call `enter_standby` unless the user explicitly asks to go to sleep, enter standby, pause/stop listening, or says goodbye — never call it on incomplete phrases or conversational pauses.
-- Recent conversation history in system context is past-session reference only. Do NOT assume incomplete old fragments are still active unless the user resumes them, and if you only catch a tiny stray noise/word like "¿Qué?" or "y" after wake-up, just ask briefly how you can help instead of inventing an unrequested response.
+- Recent conversation history in system context is past-session reference only. Do NOT assume incomplete old fragments are still active unless the user resumes them.
+- BACKGROUND NOISE & INCOMPLETE SENTENCE FILTER:
+  1) If the transcribed input is a single stray, contextless word or short echo fragment (e.g., "compró", "pelota", "más detalles", "tarea", "la estoy", "sí", "qué") that does not form a coherent command or follow-up to your question, NEVER invent a long explanation or offer tasks around that word. Instead, reply in one brief sentence: "Disculpa, ¿me hablabas a mí? No escuché la oración completa, ¿puedes repetirlo?"
+  2) If the user was speaking to you but their sentence was cut off, garbled, or incomplete, ask briefly and naturally: "Oye, no te entendí bien la frase completa, ¿me la puedes repetir?"
 """
 
 _STANDBY_PHRASE_RE = re.compile(
@@ -169,7 +172,7 @@ class JarvisLiveSession:
             kwargs["realtime_input_config"] = types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     disabled=False,
-                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
                     end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
                     prefix_padding_ms=self.config.prefix_padding_ms,
                     silence_duration_ms=self.config.silence_duration_ms,
@@ -329,6 +332,7 @@ class JarvisLiveSession:
             async def _send_mic_loop() -> None:
                 nonlocal last_activity
                 was_muted = False
+                was_speaker_playing = False
                 was_streaming_speech = False
                 while True:
                     frame = await mic_queue.get()
@@ -346,6 +350,14 @@ class JarvisLiveSession:
 
                     raw_flag = getattr(audio_in, "is_speech_active", True)
                     speech_active = raw_flag if isinstance(raw_flag, bool) else True
+
+                    if audio_out.is_playing and not speech_active:
+                        was_speaker_playing = True
+                    elif was_speaker_playing and not audio_out.is_playing:
+                        was_speaker_playing = False
+                        if not speech_active:
+                            audio_in.drain()
+                            continue
 
                     if speech_active:
                         was_streaming_speech = True

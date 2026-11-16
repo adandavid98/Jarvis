@@ -424,6 +424,19 @@ def test_audio_agc_and_wake_threshold() -> None:
     assert int(np.max(np.abs(boosted))) > 2000
     assert stream.level_percent >= 20
 
+    # Decoupled dual-branch check: distant low-amplitude voice activates wake branch
+    # without leaking distant room chatter into Gemini Live voice branch
+    far_stream = AudioInputStream(sample_rate=16000, channels=1, blocksize=1280)
+    quiet_room = (25.0 * np.sin(2 * np.pi * 400 * t)).astype(np.int16)
+    for _ in range(7):
+        far_stream._process_dual_branch(quiet_room)
+    distant_voice = (100.0 * np.sin(2 * np.pi * 400 * t)).astype(np.int16)
+    v_out, w_out, v_active = far_stream._process_dual_branch(distant_voice)
+    assert v_active is False and far_stream.is_speech_active is False
+    assert int(np.max(np.abs(v_out))) == 0
+    assert far_stream.is_wake_active is True
+    assert int(np.max(np.abs(w_out))) > 0
+
 
 def test_wake_word_multiframe_and_noise_gate() -> None:
     import numpy as np
@@ -551,7 +564,7 @@ def test_live_config_vad_and_quota_recovery(tmp_path: Path) -> None:
     ric = live_cfg.realtime_input_config
     assert ric is not None
     assert ric.automatic_activity_detection.end_of_speech_sensitivity == types.EndSensitivity.END_SENSITIVITY_LOW
-    assert ric.automatic_activity_detection.start_of_speech_sensitivity == types.StartSensitivity.START_SENSITIVITY_HIGH
+    assert ric.automatic_activity_detection.start_of_speech_sensitivity == types.StartSensitivity.START_SENSITIVITY_LOW
     assert ric.automatic_activity_detection.silence_duration_ms == 1100
     assert ric.automatic_activity_detection.prefix_padding_ms == 300
     assert ric.activity_handling == types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS
@@ -1362,5 +1375,6 @@ def test_speaker_echo_does_not_self_barge_in_or_leak_preroll() -> None:
     stream._process_dual_branch(uncorrelated_echo)
     assert barge_calls == 0
     assert stream.is_speech_active is False
+    assert len(stream._pre_roll) == 0
 
 
