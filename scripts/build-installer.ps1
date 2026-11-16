@@ -64,5 +64,11 @@ try {
     Pop-Location
 }
 
+$SetupExe = Join-Path $DistDir "Jarvis-Setup.exe"
+$SetupZip = Join-Path $DistDir "Jarvis-Setup.zip"
+if (Test-Path $SetupExe) {
+    Compress-Archive -Path $SetupExe -DestinationPath $SetupZip -Force
+}
+
 Write-Host "`nInstaller built successfully in desktop\dist\" -ForegroundColor Green
-Get-ChildItem (Join-Path $RootDir "desktop\dist") -Filter "*.exe" | Select-Object Name, Length, FullName
+Get-ChildItem $DistDir -Include "*.exe", "*.zip" -File | Select-Object Name, Length, FullName
