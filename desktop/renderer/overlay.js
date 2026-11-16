@@ -8,7 +8,12 @@ const textEl = document.getElementById('ov-text');
 const barsWrap = document.getElementById('ov-bars');
 const bars = barsWrap ? Array.from(barsWrap.querySelectorAll('span')) : [];
 
-if (ovOrbEngine) ovOrbEngine.start();
+if (window.jarvisDesktop.onWindowVisibility) {
+  window.jarvisDesktop.onWindowVisibility((visible) => {
+    if (visible) ovOrbEngine?.start();
+    else ovOrbEngine?.stop();
+  });
+}
 
 document.getElementById('ov-expand').onclick = () => window.jarvisDesktop.openFullHud();
 document.getElementById('ov-close').onclick = () => window.jarvisDesktop.hideOverlay();

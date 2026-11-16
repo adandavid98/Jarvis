@@ -153,10 +153,13 @@ function createOverlayWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: true,
     },
   });
 
   overlayWindow.setAlwaysOnTop(true, 'floating');
+  overlayWindow.on('show', () => overlayWindow?.webContents.send('window:visibility', true));
+  overlayWindow.on('hide', () => overlayWindow?.webContents.send('window:visibility', false));
   overlayWindow.loadFile(path.join(__dirname, 'renderer', 'overlay.html'));
 }
 

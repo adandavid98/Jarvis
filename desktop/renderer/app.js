@@ -117,7 +117,7 @@ function setRadialGauge(arcEl, pct) {
 }
 
 const orbEngine = window.createJarvisOrbEngine
-  ? window.createJarvisOrbEngine(reactorCanvas, { particleCount: 580, haloLayers: 4 })
+  ? window.createJarvisOrbEngine(reactorCanvas, { particleCount: 280, haloLayers: 3 })
   : null;
 let coreMode = false;
 let subtitleHideTimer = null;

@@ -1324,3 +1324,43 @@ def test_weather_search_and_web_search_loop_breaker(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_speaker_echo_does_not_self_barge_in_or_leak_preroll() -> None:
+    import numpy as np
+    from jarvis.audio import AudioInputStream, EchoCanceller, PlaybackReferenceBuffer
+
+    ref_buf = PlaybackReferenceBuffer(target_rate=16000, max_seconds=3.0)
+    t24 = np.linspace(0.0, 0.24, int(24000 * 0.24), endpoint=False)
+    speaker_24k = (7000.0 * np.sin(2 * np.pi * 300 * t24)).astype(np.int16)
+    ref_buf.push_24k(speaker_24k, source_rate=24000)
+
+    hist, active = ref_buf.snapshot(max_samples=6400)
+    assert active is True
+
+    # Simulate distorted/uncorrelated laptop speaker echo (~900 RMS, low correlation rho < 0.22)
+    t16 = np.linspace(0.0, 0.08, 1280, endpoint=False)
+    uncorrelated_echo = (1200.0 * np.sin(2 * np.pi * 777 * t16)).astype(np.int16)
+    aec = EchoCanceller()
+    _, dt_uncorr = aec.process(uncorrelated_echo, hist, noise_rms=60.0)
+    assert dt_uncorr is False
+
+    # Verify AudioInputStream never triggers self-barge-in on distorted echo
+    barge_calls = 0
+
+    def _on_barge() -> None:
+        nonlocal barge_calls
+        barge_calls += 1
+
+    stream = AudioInputStream(
+        sample_rate=16000,
+        channels=1,
+        blocksize=1280,
+        playback_ref=ref_buf,
+        on_barge_in=_on_barge,
+        barge_in_enabled=True,
+    )
+    stream._process_dual_branch(uncorrelated_echo)
+    stream._process_dual_branch(uncorrelated_echo)
+    assert barge_calls == 0
+    assert stream.is_speech_active is False
+
+

@@ -248,7 +248,7 @@ class PlaybackReferenceBuffer:
     @property
     def is_playing_echo_window(self) -> bool:
         """Return True while speaker audio played recently enough to create room echo."""
-        return (time.monotonic() - self._last_sound_time) < 0.42
+        return (time.monotonic() - self._last_sound_time) < 0.80
 
     def snapshot(self, max_samples: int = 8000) -> tuple[np.ndarray, bool]:
         """Return recent 16 kHz reference samples and whether echo window is active."""
@@ -262,7 +262,7 @@ class PlaybackReferenceBuffer:
 class EchoCanceller:
     """Multi-tap delay-aligned Wiener/RIR echo canceller with double-talk barge-in detector."""
 
-    _OFFSETS = np.concatenate((np.arange(-20, 21), np.arange(28, 220, 8))).astype(np.int64)
+    _OFFSETS = np.concatenate((np.arange(-12, 13, 2), np.arange(20, 116, 8))).astype(np.int64)
 
     def __init__(self, num_taps: int = 65, max_lag_samples: int = 4800) -> None:
         self.num_taps = int(len(self._OFFSETS)) if num_taps == 65 else num_taps
@@ -295,6 +295,8 @@ class EchoCanceller:
             return mic_z, mic_rms > max(1600.0, noise_rms * 4.5)
 
         ref_z = ref_hist.astype(np.float32) - float(np.mean(ref_hist))
+        ref_tail = ref_z[-min(m, n * 6) :]
+        ref_window_rms = float(np.sqrt(np.mean(ref_tail**2))) if len(ref_tail) else 0.0
         # Fast FFT cross-correlation across [0 .. max_lag_samples] speaker-to-mic acoustic delay
         fft_len = 1 << int(np.ceil(np.log2(m + n)))
         corr_full = np.fft.irfft(
@@ -331,11 +333,11 @@ class EchoCanceller:
             inst_coupling = float(np.clip(mic_rms / aligned_ref_rms, 0.08, 0.85))
             if inst_coupling < self._coupling * 1.35:
                 self._coupling = 0.85 * self._coupling + 0.15 * inst_coupling
-        expected_echo_rms = aligned_ref_rms * self._coupling
+        expected_echo_rms = max(aligned_ref_rms * self._coupling, ref_window_rms * self._coupling)
 
-        # Low correlation: either headphones OR dominant uncorrelated near-end speech
+        # Low correlation: either distorted speaker echo OR dominant uncorrelated near-end speech
         if best_rho < 0.22:
-            thresh = max(380.0, noise_rms * 3.1, expected_echo_rms * 1.35)
+            thresh = max(1450.0, noise_rms * 5.5, ref_window_rms * 0.65, expected_echo_rms * 1.85)
             return mic_z, mic_rms > thresh
 
         idx_mat = np.arange(n)[:, None] + (center_s + offsets)[None, :]
@@ -363,7 +365,13 @@ class EchoCanceller:
             double_talk = res_rms > max(260.0, noise_rms * 3.0, echo_rms * 0.78)
         else:
             # Reverberant laptop speaker echo (rho 0.22..0.50): require clear excursion above noise & coupling
-            double_talk = res_rms > max(380.0, noise_rms * 3.1, echo_rms * 1.45, expected_echo_rms * 1.35)
+            double_talk = res_rms > max(
+                680.0,
+                noise_rms * 4.2,
+                echo_rms * 1.65,
+                ref_window_rms * 0.50,
+                expected_echo_rms * 1.50,
+            )
         return residual.astype(np.float32), double_talk
 
 
@@ -463,13 +471,12 @@ class AudioInputStream:
         hp_vals, self._hp_zi = signal.sosfilt(self._sos, sig16.astype(np.float64), zi=self._hp_zi)
         hp_flat = hp_vals.astype(np.float32)
 
-        # Branch 2: Rate-compensated pre-emphasis for openWakeWord sibilant sensitivity
-        pre_scale = 3.0 if self._capture_sample_rate > 24000 else 3.8
-        pe = np.empty_like(raw)
-        pe[0] = (raw[0] - 0.94 * self._prev_wake_sample) * pre_scale
-        pe[1:] = (raw[1:] - 0.94 * raw[:-1]) * pre_scale
-        self._prev_wake_sample = float(raw[-1])
-        wake16 = self._downsample_to_16k(pe)
+        # Branch 2: Full-band 16 kHz + gentle high-shelf presence for far-field openWakeWord
+        diff16 = np.empty_like(hp_flat)
+        diff16[0] = hp_flat[0] - self._prev_wake_sample
+        diff16[1:] = hp_flat[1:] - hp_flat[:-1]
+        self._prev_wake_sample = float(hp_flat[-1])
+        wake16 = hp_flat + 0.45 * diff16
 
         was_active = self.is_speech_active
         barge_in_now = False
@@ -481,6 +488,18 @@ class AudioInputStream:
             ref_hist, playing_echo = np.zeros(0, dtype=np.float32), False
 
         if playing_echo:
+            if not self.barge_in_enabled:
+                self._barge_in_streak = 0
+                self._hangover = 0
+                self._peak_streak = 0
+                self._last_voice_level = 0
+                self.last_peak = 0
+                self.is_speech_active = False
+                self._pre_roll.clear()
+                self._wake_pre_roll.clear()
+                zeros = np.zeros(len(hp_flat), dtype=np.int16)
+                return zeros, zeros, False
+
             cleaned_hp, double_talk = self._aec.process(hp_flat, ref_hist, noise_rms=self._noise_rms)
             if double_talk:
                 self._barge_in_streak += 1
@@ -490,7 +509,7 @@ class AudioInputStream:
             if self._barge_in_streak >= 2:
                 barge_in_now = True
                 hp_flat = cleaned_hp
-                if self.barge_in_enabled and self.on_barge_in is not None:
+                if self.on_barge_in is not None:
                     try:
                         self.on_barge_in()
                     except Exception:
@@ -502,7 +521,7 @@ class AudioInputStream:
                 self._last_voice_level = 0
                 self.last_peak = 0
                 self.is_speech_active = False
-                self._pre_roll.append(cleaned_hp)
+                self._pre_roll.append(cleaned_hp * 0.15)
                 zeros = np.zeros(len(hp_flat), dtype=np.int16)
                 return zeros, zeros, False
         else:
@@ -532,8 +551,8 @@ class AudioInputStream:
             elif self._hangover == 0 and f_rms < self._noise_rms * 1.25:
                 self._noise_rms = float(np.clip(0.85 * self._noise_rms + 0.15 * f_rms, 20.0, 1200.0))
 
-        is_sustained = barge_in_now or (f_rms > max(70.0, self._noise_rms * 1.45))
-        has_spike = (f_pk > max(220.0, self._noise_rms * 4.5)) or (w_pk > max(220.0, self._noise_rms * 4.5))
+        is_sustained = barge_in_now or (f_rms > max(52.0, self._noise_rms * 1.35))
+        has_spike = (f_pk > max(165.0, self._noise_rms * 3.8)) or (w_pk > max(165.0, self._noise_rms * 3.8))
         if has_spike and not is_sustained:
             self._peak_streak += 1
         elif is_sustained:
@@ -544,7 +563,7 @@ class AudioInputStream:
         is_voice = is_sustained or (self._peak_streak >= 2)
         if is_voice:
             self._hangover = 22  # 1.76s hangover preserves full phrases and mid-sentence pauses
-            target_gain = float(np.clip(9500.0 / max(100.0, f_pk), 1.2, 9.0))
+            target_gain = float(np.clip(10500.0 / max(75.0, f_pk), 1.2, 12.0))
             self._env_gain = 0.45 * self._env_gain + 0.55 * target_gain
             excess = max(0.0, f_rms - self._noise_rms * 1.35)
             self._last_voice_level = min(
@@ -570,7 +589,7 @@ class AudioInputStream:
                     self._wake_env_rms = 0.85 * self._wake_env_rms + 0.15 * clamped_w
                 else:
                     self._wake_env_rms = 0.96 * self._wake_env_rms + 0.04 * clamped_w
-            w_slow_gain = float(np.clip(1800.0 / max(180.0, self._wake_env_rms), 1.0, 3.8))
+            w_slow_gain = float(np.clip(3200.0 / max(90.0, self._wake_env_rms), 1.3, 6.5))
             if not was_active and self._pre_roll:
                 # Emit up to 240ms of pre-roll frames so initial consonants are never clipped
                 roll_gain = max(1.2, min(4.5, self._env_gain * 0.8))

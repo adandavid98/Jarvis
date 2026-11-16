@@ -1,7 +1,7 @@
 :root {
   --bg: #040609;
-  --panel-bg: rgba(7, 13, 20, 0.72);
-  --panel-deep: rgba(3, 8, 13, 0.86);
+  --panel-bg: rgba(7, 13, 20, 0.90);
+  --panel-deep: rgba(3, 8, 13, 0.94);
   --cyan: #00eeff;
   --cobalt: #009dff;
   --cyan-dim: rgba(0, 238, 255, 0.20);
@@ -191,7 +191,6 @@ html, body {
   min-height: 0;
   min-width: 0;
   background: var(--panel-bg);
-  backdrop-filter: blur(14px);
   border: 1px solid rgba(0, 238, 255, 0.14);
   border-radius: 6px;
   padding: 12px;
@@ -1080,7 +1079,7 @@ input[type="password"]:focus {
   margin: 0 auto 8px;
   padding: 7px 14px;
   border-radius: 8px;
-  background: rgba(3, 8, 13, 0.84);
+  background: rgba(3, 8, 13, 0.92);
   border: 1px solid rgba(0, 238, 255, 0.22);
   box-shadow: 0 0 18px rgba(0, 200, 255, 0.14);
   font-size: 12.5px;
@@ -1088,7 +1087,6 @@ input[type="password"]:focus {
   text-align: center;
   color: #5eeeff;
   text-shadow: 0 0 8px rgba(0, 238, 255, 0.42);
-  backdrop-filter: blur(10px);
 }
 
 .live-subtitle.user-voice {

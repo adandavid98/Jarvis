@@ -862,9 +862,13 @@ class JarvisBridge:
         last_out_sent = -1
         ticks = 0
         while True:
-            await asyncio.sleep(0.25 if self._telemetry_paused else 0.08)
+            await asyncio.sleep(0.35 if self._telemetry_paused else 0.14)
             ticks += 1
-            if ticks >= 20 and self._audio_in is not None:
+            if (
+                ticks >= 40
+                and self._audio_in is not None
+                and self._state in {"idle_wake", "stopped"}
+            ):
                 ticks = 0
                 cur_eps = get_windows_default_endpoints(ensure_mic_unmuted=False)
                 if cur_eps != ("", "") and self._default_endpoints != ("", "") and cur_eps != self._default_endpoints:
@@ -877,11 +881,18 @@ class JarvisBridge:
                             self._audio_out.reopen_on_default()
                     except Exception:
                         self.logger.exception("Failed reopening audio stream after endpoint switch")
+            elif ticks >= 40:
+                ticks = 0
             if self._telemetry_paused or not self._clients:
                 continue
             level = self._audio_in.level_percent if self._audio_in is not None else 0
             out_level = self._audio_out.level_percent if self._audio_out is not None else 0
-            if level != last_sent or out_level != last_out_sent:
+            if (
+                abs(level - last_sent) >= 3
+                or abs(out_level - last_out_sent) >= 3
+                or (level == 0 and last_sent != 0)
+                or (out_level == 0 and last_out_sent != 0)
+            ):
                 last_sent = level
                 last_out_sent = out_level
                 await self._broadcast({"type": "mic_level", "level": level, "output_level": out_level})

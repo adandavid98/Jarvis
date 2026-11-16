@@ -37,10 +37,10 @@
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
 
-    const particleCount = options.particleCount || 560;
+    const particleCount = options.particleCount || 260;
     const particles = buildFibonacciParticles(particleCount);
-    const haloLayers = options.haloLayers || 4;
-    const haloPoints = options.haloPoints || 96;
+    const haloLayers = options.haloLayers || 3;
+    const haloPoints = options.haloPoints || 64;
 
     let state = 'connecting';
     let micLevel = 0;
@@ -50,11 +50,12 @@
     let rotX = 0.22;
     let phaseT = 0;
     let lastTs = 0;
+    let lastRenderTs = 0;
     let rafId = null;
     let running = false;
 
     function syncBackingSize() {
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const dpr = Math.min(1.25, window.devicePixelRatio || 1);
       const rect = canvas.getBoundingClientRect();
       const targetW = Math.max(40, Math.round((rect.width || canvas.width) * dpr));
       const targetH = Math.max(40, Math.round((rect.height || canvas.height) * dpr));
@@ -70,8 +71,18 @@
         rafId = null;
         return;
       }
+      const isSpeaking = state === 'speaking';
+      const isListening = state === 'listening';
+      const isBusy = state === 'tool_running' || state === 'thinking';
+      const isStopped = state === 'stopped' || state === 'offline' || state === 'needs_key';
+      const minFrameMs = (isSpeaking || isListening || isBusy) ? 32 : 64;
+      if (lastRenderTs && (ts - lastRenderTs) < minFrameMs) {
+        rafId = requestAnimationFrame(drawFrame);
+        return;
+      }
+      lastRenderTs = ts;
       if (!lastTs) lastTs = ts;
-      const dt = Math.min(0.05, Math.max(0.001, (ts - lastTs) / 1000));
+      const dt = Math.min(0.08, Math.max(0.001, (ts - lastTs) / 1000));
       lastTs = ts;
 
       syncBackingSize();
@@ -80,11 +91,6 @@
       const cx = w / 2;
       const cy = h / 2;
       const minDim = Math.min(w, h);
-
-      const isSpeaking = state === 'speaking';
-      const isListening = state === 'listening';
-      const isBusy = state === 'tool_running' || state === 'thinking';
-      const isStopped = state === 'stopped' || state === 'offline' || state === 'needs_key';
 
       const liveOut = outputLevel / 100;
       const liveMic = micLevel / 100;
@@ -143,10 +149,14 @@
           else ctx.lineTo(px, py);
         }
         ctx.closePath();
-        ctx.lineWidth = minDim * (0.032 - layerRatio * 0.012);
-        ctx.strokeStyle = `rgba(${layer % 2 === 0 ? pal.primary : pal.secondary}, ${layerAlpha})`;
-        ctx.shadowColor = pal.glow;
-        ctx.shadowBlur = minDim * 0.045;
+        const baseLw = minDim * (0.030 - layerRatio * 0.010);
+        const rgb = layer % 2 === 0 ? pal.primary : pal.secondary;
+        // Soft wide glow pass + crisp inner core pass (zero shadowBlur CPU cost)
+        ctx.lineWidth = baseLw * 2.2;
+        ctx.strokeStyle = `rgba(${rgb}, ${(layerAlpha * 0.28).toFixed(3)})`;
+        ctx.stroke();
+        ctx.lineWidth = baseLw * 0.9;
+        ctx.strokeStyle = `rgba(${rgb}, ${Math.min(0.85, layerAlpha * 0.75).toFixed(3)})`;
         ctx.stroke();
       }
       ctx.restore();
@@ -172,12 +182,13 @@
       ctx.stroke();
       ctx.restore();
 
-      // Layer 3: 3D Fibonacci Particle Sphere inside the cavity
+      // Layer 3: Batched 3D Fibonacci Particle Sphere (3 depth buckets = 3 fill() calls/frame)
       const cosY = Math.cos(rotY);
       const sinY = Math.sin(rotY);
       const cosX = Math.cos(rotX);
       const sinX = Math.sin(rotX);
       const sphereR = coreRadius * (0.74 + smoothEnergy * 0.12);
+      const buckets = [[], [], []];
 
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
@@ -197,14 +208,31 @@
         const sy = cy + y2 * sphereR * perspective;
         const depthNorm = (z2 + 1) * 0.5; // 0..1
 
-        const dotRadius = Math.max(0.7, (minDim * 0.0036) * p.sizeBias * (0.55 + depthNorm * 0.85));
-        const dotAlpha = isStopped
-          ? 0.08 + depthNorm * 0.22
-          : Math.min(0.96, 0.14 + depthNorm * (0.55 + smoothEnergy * 0.35));
+        const dotRadius = Math.max(0.7, (minDim * 0.0038) * p.sizeBias * (0.55 + depthNorm * 0.85));
+        const bucketIdx = depthNorm < 0.34 ? 0 : depthNorm < 0.68 ? 1 : 2;
+        buckets[bucketIdx].push(sx, sy, dotRadius);
+      }
 
-        ctx.fillStyle = `rgba(${pal.primary}, ${dotAlpha})`;
+      const bucketAlphas = isStopped
+        ? [0.12, 0.20, 0.30]
+        : [
+            0.22,
+            Math.min(0.62, 0.40 + smoothEnergy * 0.24),
+            Math.min(0.95, 0.62 + smoothEnergy * 0.32),
+          ];
+
+      for (let b = 0; b < 3; b++) {
+        const coords = buckets[b];
+        if (!coords.length) continue;
+        ctx.fillStyle = `rgba(${pal.primary}, ${bucketAlphas[b].toFixed(3)})`;
         ctx.beginPath();
-        ctx.arc(sx, sy, dotRadius, 0, Math.PI * 2);
+        for (let k = 0; k < coords.length; k += 3) {
+          const sx = coords[k];
+          const sy = coords[k + 1];
+          const r = coords[k + 2];
+          ctx.moveTo(sx + r, sy);
+          ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        }
         ctx.fill();
       }
 
