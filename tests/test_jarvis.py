@@ -1260,3 +1260,67 @@ def test_audio_input_defaults_to_shared_wasapi_so_other_apps_keep_mic(monkeypatc
     assert getattr(captured_settings[0], "exclusive", False) is False
 
 
+def test_weather_search_and_web_search_loop_breaker(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    from jarvis.live_session import JarvisLiveSession
+    from jarvis.memory import JarvisMemory
+    from jarvis.tools import build_default_registry
+
+    cfg = JarvisConfig(gemini_api_key="dummy-key", db_path=tmp_path / "m.db", data_dir=tmp_path)
+    mem = JarvisMemory(cfg.db_path)
+    reg = build_default_registry(cfg, mem)
+
+    async def _fake_get(url: str, params: dict[str, object] | None = None):
+        if "geocoding-api.open-meteo.com" in url:
+            return MagicMock(
+                status_code=200,
+                json=lambda: {"results": [{"name": "New York", "admin1": "New York", "country": "United States", "latitude": 40.71, "longitude": -74.0}]},
+            )
+        if "api.open-meteo.com" in url:
+            return MagicMock(
+                status_code=200,
+                json=lambda: {"current": {"temperature_2m": 12.5, "apparent_temperature": 11.0, "relative_humidity_2m": 58, "wind_speed_10m": 14.2}},
+            )
+        return MagicMock(status_code=404, text="", json=lambda: {})
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.get.side_effect = _fake_get
+
+    async def run() -> None:
+        with patch("jarvis.tools.desktop.httpx.AsyncClient", return_value=mock_client):
+            wres = await reg.execute("web_search", {"query": "current temperature in New York"})
+        assert wres["status"] == "ok"
+        assert wres["snippets"]
+        assert "12.5°C" in wres["snippets"][0]["snippet"]
+        assert "54.5°F" in wres["snippets"][0]["snippet"]
+
+        # Verify loop breaker blocks 3rd+ web_search within same user turn
+        session_mgr = JarvisLiveSession(cfg, mem, reg)
+        sent: list[object] = []
+
+        class _Sess:
+            async def send_tool_response(self, *, function_responses):
+                sent.extend(function_responses)
+
+        s = _Sess()
+        session_mgr._record_user_utterance("¿En cuánto está la temperatura en New York?")
+        with patch("jarvis.tools.desktop.httpx.AsyncClient", return_value=mock_client):
+            for i in range(4):
+                call = SimpleNamespace(id=f"id-{i}", name="web_search", args={"query": f"weather ny {i}"})
+                await session_mgr._execute_and_respond(s, call)
+
+        assert sent[0].response["status"] == "ok"
+        assert sent[1].response["status"] == "ok"
+        assert sent[2].response["status"] == "limit_reached"
+        assert sent[3].response["status"] == "limit_reached"
+
+        # New user prompt resets the search cap
+        session_mgr._record_user_utterance("Ahora busca el clima en Madrid")
+        with patch("jarvis.tools.desktop.httpx.AsyncClient", return_value=mock_client):
+            await session_mgr._execute_and_respond(s, SimpleNamespace(id="id-new", name="web_search", args={"query": "weather madrid"}))
+        assert sent[-1].response["status"] == "ok"
+
+    asyncio.run(run())
+
+

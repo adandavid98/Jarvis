@@ -25,7 +25,7 @@ Guidelines:
 - Execute requested work immediately using your tools (`create_document`, `write_file`, `edit_file`, `run_coding_agent`, `fetch_web_page`, `read_pdf`, `run_shell_command`, `search_code`, etc.).
 - For complete multi-file programming projects or complex debugging inside the active workspace, delegate to `run_coding_agent`.
 - For academic essays, APA/IEEE papers, or formatted reports in `.docx`/`.pdf`, use `create_document` with structured Markdown (`#` headings, lists, `| tables |`, `style="apa"` or `"report"`, plus author/institution/references).
-- When researching a topic online or in a local PDF, use `web_search`, `fetch_web_page`, or `read_pdf` before synthesizing or creating a document.
+- When researching a topic online or in a local PDF, use `web_search`, `fetch_web_page`, or `read_pdf` before synthesizing or creating a document. Never call `web_search` in a loop — run at most 1-2 searches per question and answer with the gathered results (or tell the user what is shown in the viewer).
 - When asked to create a PDF, DOCX, or file, generate it directly on disk — do NOT read the entire document contents aloud.
 - Keep spoken responses crisp and brief (1-2 sentences): confirm what was created or changed and where it was saved, instead of reading long text, file paths, raw JSON, or terminal logs aloud unless asked.
 - You have asynchronous NON_BLOCKING tools for Windows desktop control, document/file management, PowerShell commands, reminders/memory, webhooks, code search, git inspection, and running tests.
@@ -91,11 +91,13 @@ class JarvisLiveSession:
         self._resumption_handle: str | None = None
         self._standby_event: asyncio.Event | None = None
         self._recent_user_utterances: list[tuple[float, str]] = []
+        self._turn_tool_counts: dict[str, int] = {}
 
     def _record_user_utterance(self, text: str) -> None:
         cleaned = text.strip()
         if not cleaned:
             return
+        self._turn_tool_counts.clear()
         self._recent_user_utterances.append((_monotonic(), cleaned))
         if len(self._recent_user_utterances) > 12:
             del self._recent_user_utterances[:-12]
@@ -188,7 +190,22 @@ class JarvisLiveSession:
         args = dict(call.args) if call.args else {}
         print(f"\n[tool] -> {call.name}({args})")
         await self._emit({"type": "tool", "phase": "start", "name": call.name, "args": args})
-        result = await self.registry.execute(call.name, args)
+
+        if call.name in {"web_search", "fetch_web_page"}:
+            count = self._turn_tool_counts.get(call.name, 0) + 1
+            self._turn_tool_counts[call.name] = count
+            if count > 2:
+                result = {
+                    "status": "limit_reached",
+                    "error": (
+                        f"{call.name} limit (2 calls per turn) reached. "
+                        "Stop searching and answer the user now using the gathered data or viewer."
+                    ),
+                }
+            else:
+                result = await self.registry.execute(call.name, args)
+        else:
+            result = await self.registry.execute(call.name, args)
         if call.name == "enter_standby" and result.get("standby"):
             now = _monotonic()
             recent_text = " ".join(t for ts, t in self._recent_user_utterances if (now - ts) <= 20.0)
@@ -252,6 +269,7 @@ class JarvisLiveSession:
         active_tasks: set[asyncio.Task[None]] = set()
         end_reason = "closed"
         self._recent_user_utterances.clear()
+        self._turn_tool_counts.clear()
 
         await self._emit({"type": "state", "state": "listening"})
 

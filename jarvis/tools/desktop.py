@@ -348,6 +348,66 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             return []
         return snippets[:max_results]
 
+    _WEATHER_QUERY_RE = re.compile(r"\b(weather|temperature|temperatura|clima|forecast|pron[oó]stico|grados)\b", re.I)
+    _WEATHER_STOP_RE = re.compile(
+        r"\b(current|today|now|right|what|is|the|in|at|for|of|time|and|weather|temperature|temperatura|clima|forecast|pronostico|pronóstico|actual|hoy|en|de|la|el|cual|cu[aá]l|como|c[oó]mo|esta|est[aá])\b",
+        re.I,
+    )
+
+    async def _fetch_live_weather_snippet(query: str) -> list[dict[str, str]]:
+        """Fetch real-time temperature/weather from Open-Meteo when query asks for weather."""
+        if not _WEATHER_QUERY_RE.search(query):
+            return []
+        city = " ".join(_WEATHER_STOP_RE.sub(" ", query).split()).strip(" ?,.")
+        if len(city) < 2:
+            city = "New York"
+        try:
+            async with httpx.AsyncClient(timeout=4.5, follow_redirects=True) as client:
+                geo = await client.get(
+                    "https://geocoding-api.open-meteo.com/v1/search",
+                    params={"name": city, "count": 1, "language": "en", "format": "json"},
+                )
+                if geo.status_code != 200:
+                    return []
+                results = geo.json().get("results") or []
+                if not results:
+                    return []
+                loc = results[0]
+                lat, lon = loc["latitude"], loc["longitude"]
+                label = ", ".join(p for p in (loc.get("name"), loc.get("admin1"), loc.get("country")) if p)
+                fc = await client.get(
+                    "https://api.open-meteo.com/v1/forecast",
+                    params={
+                        "latitude": lat,
+                        "longitude": lon,
+                        "current": "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m",
+                        "temperature_unit": "celsius",
+                    },
+                )
+                if fc.status_code != 200:
+                    return []
+                cur = fc.json().get("current") or {}
+                temp_c = cur.get("temperature_2m")
+                if temp_c is None:
+                    return []
+                temp_f = round(float(temp_c) * 9 / 5 + 32, 1)
+                feels_c = cur.get("apparent_temperature")
+                hum = cur.get("relative_humidity_2m")
+                wind = cur.get("wind_speed_10m")
+                summary = (
+                    f"Live weather in {label}: {temp_c}°C ({temp_f}°F), "
+                    f"feels like {feels_c}°C, humidity {hum}%, wind {wind} km/h."
+                )
+                return [
+                    {
+                        "title": f"Current Weather — {label}",
+                        "url": f"https://open-meteo.com/",
+                        "snippet": summary,
+                    }
+                ]
+        except Exception:
+            return []
+
     async def web_search(query: str) -> dict[str, Any]:
         cleaned = query.strip()
         if not cleaned:
@@ -355,8 +415,9 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
         search_url = f"https://duckduckgo.com/?q={urllib.parse.quote_plus(cleaned)}"
         if os.environ.get("JARVIS_EMBEDDED_VIEWER") != "1":
             webbrowser.open(search_url)
-        snippets = await _fetch_web_snippets(cleaned, max_results=3)
-        return {
+        weather_snippets = await _fetch_live_weather_snippet(cleaned)
+        snippets = weather_snippets if weather_snippets else await _fetch_web_snippets(cleaned, max_results=3)
+        res: dict[str, Any] = {
             "status": "ok",
             "query": cleaned,
             "kind": "web_search",
@@ -364,6 +425,12 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             "title": f"Search: {cleaned}",
             "snippets": snippets,
         }
+        if not snippets:
+            res["hint"] = (
+                "Search provider returned no live snippets; viewer is already open for the user. "
+                "Do NOT repeat web_search in a loop — answer concisely or inform the user."
+            )
+        return res
 
     def enter_standby(reason: str = "") -> dict[str, Any]:
         return {
