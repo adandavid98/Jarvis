@@ -14,7 +14,7 @@ class WakeWordDetector:
         threshold: float = 0.50,
         consecutive_frames: int = 2,
         instant_threshold: float = 0.52,
-        min_voice_rms: float = 85.0,
+        min_voice_rms: float = 45.0,
     ) -> None:
         self.model_name = model_name
         self.threshold = threshold
@@ -79,9 +79,10 @@ class WakeWordDetector:
         elif best_score < (self.threshold * 0.70):
             self._hit_streak = 0
 
+        effective_instant = max(self.instant_threshold, self.threshold + 0.08)
         detected = (
             self._hit_streak >= self.consecutive_frames
-            or best_score >= self.instant_threshold
+            or best_score >= effective_instant
         )
         return detected, best_score
 

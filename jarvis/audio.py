@@ -598,12 +598,12 @@ class AudioInputStream:
         self.is_speech_active = active
 
         # Branch 2 (openWakeWord): Far-field sensitivity keeps "Hey Jarvis" responsive across the room
-        wake_is_voice = is_voice or (w_rms > max(48.0, self._noise_rms * 1.30)) or (
-            w_pk > max(155.0, self._noise_rms * 3.6)
+        wake_is_voice = is_voice or (w_rms > max(32.0, self._noise_rms * 1.08)) or (
+            w_pk > max(110.0, self._noise_rms * 2.6)
         )
         if wake_is_voice:
-            self._wake_hangover = 10  # 800ms hangover captures complete wake phrase
-            clamped_w = float(np.clip(w_rms, 160.0, 2600.0))
+            self._wake_hangover = 12  # 960ms hangover captures complete soft wake phrase
+            clamped_w = float(np.clip(w_rms, 110.0, 2600.0))
             if clamped_w > self._wake_env_rms:
                 self._wake_env_rms = 0.85 * self._wake_env_rms + 0.15 * clamped_w
             else:
@@ -613,7 +613,7 @@ class AudioInputStream:
 
         wake_active = active or wake_is_voice or (self._wake_hangover > 0)
         self.is_wake_active = wake_active
-        w_slow_gain = float(np.clip(3200.0 / max(90.0, self._wake_env_rms), 1.3, 6.5))
+        w_slow_gain = float(np.clip(3600.0 / max(75.0, self._wake_env_rms), 1.4, 9.0))
 
         if active:
             if not was_active and self._pre_roll:
