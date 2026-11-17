@@ -278,7 +278,8 @@ class JarvisLiveSession:
 
         standby_event = asyncio.Event()
         self._standby_event = standby_event
-        greeting_cache_path = self.config.data_dir / "wake_greeting_24k.pcm"
+        safe_voice = re.sub(r"[^a-z0-9_-]+", "_", self.config.voice_name.lower()).strip("_") or "default"
+        greeting_cache_path = self.config.data_dir / f"wake_greeting_24k_{safe_voice}.pcm"
         use_cached_greeting = (
             wake_greeting
             and not initial_prompt

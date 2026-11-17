@@ -601,7 +601,7 @@ def test_live_config_vad_and_quota_recovery(tmp_path: Path) -> None:
     session._client = _FakeClient()  # type: ignore[assignment]
 
     # Create cached wake greeting PCM so wake_greeting replays locally without prompt
-    greeting_pcm_path = tmp_path / "wake_greeting_24k.pcm"
+    greeting_pcm_path = tmp_path / f"wake_greeting_24k_{cfg.voice_name.lower()}.pcm"
     greeting_pcm_path.write_bytes(b"\x01\x00" * 5000)
 
     class _FakeAudioOut:
@@ -746,7 +746,7 @@ def test_wake_greeting_recording_without_cache(tmp_path: Path) -> None:
         )
     )
     assert reason == "standby"
-    cache_path = tmp_path / "wake_greeting_24k.pcm"
+    cache_path = tmp_path / f"wake_greeting_24k_{cfg.voice_name.lower()}.pcm"
     assert cache_path.exists()
     assert cache_path.read_bytes() == greeting_bytes
 
