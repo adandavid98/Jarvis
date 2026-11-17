@@ -41,11 +41,20 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Build Windows installer & publish to GitHub Releases
+      - name: Build Windows installer & zip
         shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
-          cd desktop
-          npx electron-builder --win --publish always
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            desktop/dist/Jarvis-Setup.exe
+            desktop/dist/Jarvis-Setup.exe.blockmap
+            desktop/dist/Jarvis-Setup.zip
+            desktop/dist/latest.yml

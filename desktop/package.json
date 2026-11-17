@@ -1,6 +1,6 @@
 {
   "name": "jarvis-desktop",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Futuristic Windows desktop HUD for Jarvis voice & text automation",
   "main": "main.js",
   "scripts": {
@@ -22,7 +22,8 @@
       {
         "provider": "github",
         "owner": "adandavid98",
-        "repo": "Jarvis"
+        "repo": "Jarvis",
+        "releaseType": "release"
       }
     ],
     "directories": {
