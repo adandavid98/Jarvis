@@ -851,10 +851,8 @@ class AudioInputStream:
         self._stream = self._open_portaudio_stream()
         return self._queue
 
-    def reopen_on_default(self) -> None:
-        """Hot-swap the underlying PortAudio input stream when Windows changes default mic."""
-        if self._loop is None or self._queue is None:
-            return
+    def close_stream(self) -> None:
+        """Stop and close the underlying PortAudio input stream before device refresh."""
         if self._stream is not None:
             try:
                 self._stream.stop()
@@ -865,6 +863,12 @@ class AudioInputStream:
             except Exception:
                 pass
             self._stream = None
+
+    def reopen_on_default(self) -> None:
+        """Hot-swap the underlying PortAudio input stream when Windows changes default mic."""
+        if self._loop is None or self._queue is None:
+            return
+        self.close_stream()
         self._stream = self._open_portaudio_stream()
 
     def drain(self) -> None:
@@ -980,8 +984,8 @@ class AudioOutputStream:
             return
         self._stream = self._open_portaudio_stream()
 
-    def reopen_on_default(self) -> None:
-        """Hot-swap the speaker output stream when Windows changes default output device."""
+    def close_stream(self) -> None:
+        """Stop and close the underlying PortAudio output stream before device refresh."""
         if self._stream is not None:
             try:
                 self._stream.stop()
@@ -992,6 +996,10 @@ class AudioOutputStream:
             except Exception:
                 pass
             self._stream = None
+
+    def reopen_on_default(self) -> None:
+        """Hot-swap the speaker output stream when Windows changes default output device."""
+        self.close_stream()
         self._stream = self._open_portaudio_stream()
 
     def enqueue(self, pcm_bytes: bytes) -> None:

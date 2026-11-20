@@ -870,15 +870,21 @@ class JarvisBridge:
                 and self._state in {"idle_wake", "stopped"}
             ):
                 ticks = 0
-                cur_eps = get_windows_default_endpoints(ensure_mic_unmuted=False)
+                cur_eps = await asyncio.to_thread(get_windows_default_endpoints, False)
                 if cur_eps != ("", "") and self._default_endpoints != ("", "") and cur_eps != self._default_endpoints:
-                    self._default_endpoints = get_windows_default_endpoints(ensure_mic_unmuted=True)
-                    refresh_audio_devices()
+                    self._default_endpoints = await asyncio.to_thread(get_windows_default_endpoints, True)
                     self.logger.info("Default Windows audio endpoints changed -> %s", self._default_endpoints)
                     try:
-                        self._audio_in.reopen_on_default()
+                        # Close active WASAPI streams BEFORE terminating/re-initializing PortAudio
+                        # so Windows audio drivers never spin on orphaned stream handles.
+                        self._audio_in.close_stream()
                         if self._audio_out is not None:
-                            self._audio_out.reopen_on_default()
+                            self._audio_out.close_stream()
+                        await asyncio.sleep(0.15)
+                        await asyncio.to_thread(refresh_audio_devices)
+                        await asyncio.to_thread(self._audio_in.reopen_on_default)
+                        if self._audio_out is not None:
+                            await asyncio.to_thread(self._audio_out.reopen_on_default)
                     except Exception:
                         self.logger.exception("Failed reopening audio stream after endpoint switch")
             elif ticks >= 40:
