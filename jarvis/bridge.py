@@ -862,10 +862,15 @@ class JarvisBridge:
         last_out_sent = -1
         ticks = 0
         while True:
-            await asyncio.sleep(0.35 if self._telemetry_paused else 0.14)
+            step_sec = (
+                0.35
+                if self._telemetry_paused
+                else (0.25 if self._state in {"idle_wake", "stopped", "offline"} else 0.14)
+            )
+            await asyncio.sleep(step_sec)
             ticks += 1
             if (
-                ticks >= 40
+                ticks >= 25
                 and self._audio_in is not None
                 and self._state in {"idle_wake", "stopped"}
             ):
@@ -887,7 +892,7 @@ class JarvisBridge:
                             await asyncio.to_thread(self._audio_out.reopen_on_default)
                     except Exception:
                         self.logger.exception("Failed reopening audio stream after endpoint switch")
-            elif ticks >= 40:
+            elif ticks >= 25:
                 ticks = 0
             if self._telemetry_paused or not self._clients:
                 continue

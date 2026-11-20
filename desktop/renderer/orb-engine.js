@@ -53,6 +53,20 @@
     let lastRenderTs = 0;
     let rafId = null;
     let running = false;
+    let viewerActive = false;
+
+    function isPassiveState(s) {
+      return s !== 'speaking' && s !== 'listening' && s !== 'tool_running' && s !== 'thinking';
+    }
+
+    function shouldFreezeIdle() {
+      return viewerActive && isPassiveState(state);
+    }
+
+    function scheduleNext() {
+      if (!running || rafId !== null) return;
+      rafId = requestAnimationFrame(drawFrame);
+    }
 
     function syncBackingSize() {
       const dpr = Math.min(1.25, window.devicePixelRatio || 1);
@@ -67,12 +81,11 @@
     }
 
     function drawFrame(ts) {
+      rafId = null;
       if (!running) {
-        rafId = null;
         return;
       }
       if (typeof document !== 'undefined' && document.hidden) {
-        rafId = requestAnimationFrame(drawFrame);
         return;
       }
       const isSpeaking = state === 'speaking';
@@ -88,7 +101,7 @@
             ? 80
             : 64;
       if (lastRenderTs && (ts - lastRenderTs) < minFrameMs) {
-        rafId = requestAnimationFrame(drawFrame);
+        scheduleNext();
         return;
       }
       lastRenderTs = ts;
@@ -247,12 +260,24 @@
         ctx.fill();
       }
 
-      rafId = requestAnimationFrame(drawFrame);
+      // Draw once in freeze-idle mode (e.g. standby while watching video in split viewer), then pause RAF
+      if (!shouldFreezeIdle()) {
+        scheduleNext();
+      }
     }
 
     return {
       setState(nextState) {
         state = String(nextState || 'connecting');
+        if (running && !shouldFreezeIdle()) {
+          scheduleNext();
+        }
+      },
+      setViewerActive(active) {
+        viewerActive = Boolean(active);
+        if (running) {
+          scheduleNext();
+        }
       },
       setAudio({ mic, output } = {}) {
         if (mic !== undefined) micLevel = Math.max(0, Math.min(100, Number(mic) || 0));
@@ -262,7 +287,7 @@
         if (running) return;
         running = true;
         lastTs = 0;
-        rafId = requestAnimationFrame(drawFrame);
+        scheduleNext();
       },
       stop() {
         running = false;

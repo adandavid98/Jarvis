@@ -5,6 +5,11 @@ const { spawn } = require('child_process');
 const WebSocket = require('ws');
 const { autoUpdater } = require('electron-updater');
 
+// Enable hardware-accelerated GPU rasterization & video decode for embedded WebContentsView
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('enable-zero-copy');
+
 const BRIDGE_PORT = 8765;
 let mainWindow = null;
 let overlayWindow = null;
@@ -409,7 +414,15 @@ ipcMain.on('viewer:set-bounds', (_ev, bounds) => {
   });
 });
 
+function pauseViewerMedia() {
+  if (!viewerView || viewerView.webContents.isDestroyed()) return;
+  viewerView.webContents.executeJavaScript(
+    "document.querySelectorAll('video,audio').forEach(m => { try { m.pause(); } catch (_) {} });"
+  ).catch(() => {});
+}
+
 ipcMain.on('viewer:close', () => {
+  pauseViewerMedia();
   if (viewerView && viewerAttached && mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.contentView.removeChildView(viewerView);
     viewerAttached = false;
@@ -427,6 +440,7 @@ ipcMain.on('viewer:navigate', (_ev, action) => {
 ipcMain.on('viewer:open-external', (_ev, url) => {
   const target = url || viewerView?.webContents?.getURL();
   if (target && /^https?:\/\//i.test(target)) {
+    pauseViewerMedia();
     shell.openExternal(target);
   }
 });

@@ -369,6 +369,7 @@ function openViewer(url) {
   viewerPane.classList.remove('hidden');
   viewerResizer.classList.remove('hidden');
   viewerOpenState = true;
+  orbEngine?.setViewerActive?.(true);
   if (url) viewerUrlInput.value = url;
   window.jarvisDesktop.viewerOpen(url || 'https://duckduckgo.com');
   requestAnimationFrame(() => syncViewerBounds());
@@ -376,6 +377,7 @@ function openViewer(url) {
 
 function closeViewer() {
   viewerOpenState = false;
+  orbEngine?.setViewerActive?.(false);
   viewerExpanded = false;
   hudLayout?.classList.remove('viewer-active');
   centerWorkspace.classList.remove('viewer-expanded');
