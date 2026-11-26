@@ -67,6 +67,7 @@ async def run_wakeword_loop(
         playback_ref=audio_out.playback_ref,
         on_barge_in=audio_out.clear,
         barge_in_enabled=config.barge_in_enabled,
+        silence_duration_ms=config.silence_duration_ms,
     )
 
     loop = asyncio.get_running_loop()
@@ -118,6 +119,7 @@ async def run_direct_voice(
         playback_ref=audio_out.playback_ref,
         on_barge_in=audio_out.clear,
         barge_in_enabled=config.barge_in_enabled,
+        silence_duration_ms=config.silence_duration_ms,
     )
 
     loop = asyncio.get_running_loop()

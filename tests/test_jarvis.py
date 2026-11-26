@@ -494,6 +494,22 @@ def test_audio_agc_and_wake_threshold() -> None:
     assert far_stream.is_wake_active is True
     assert int(np.max(np.abs(w_out))) > 0
 
+    # Long-monologue test (>5s continuous speech) must NOT inflate _noise_rms or drop softer words,
+    # and hangover frames must scale with configured End-of-Speech Pause.
+    long_stream = AudioInputStream(sample_rate=16000, channels=1, blocksize=1280, silence_duration_ms=4000)
+    assert long_stream._hangover_frames == 50
+    for _ in range(7):
+        long_stream._process_dual_branch(quiet_room)
+    baseline_noise = long_stream._noise_rms
+    loud_monologue = (1800.0 * np.sin(2 * np.pi * 350 * t)).astype(np.int16)
+    for _ in range(65):  # 5.2 seconds continuous speech (> 3.2s history window)
+        long_stream._process_dual_branch(loud_monologue)
+    assert long_stream._noise_rms <= baseline_noise * 1.1
+    softer_phrase = (300.0 * np.sin(2 * np.pi * 350 * t)).astype(np.int16)
+    v_soft, _, active_soft = long_stream._process_dual_branch(softer_phrase)
+    assert active_soft is True
+    assert int(np.max(np.abs(v_soft))) > 0
+
 
 def test_wake_word_multiframe_and_noise_gate() -> None:
     import numpy as np

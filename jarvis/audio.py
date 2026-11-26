@@ -424,6 +424,7 @@ class AudioInputStream:
         playback_ref: PlaybackReferenceBuffer | None = None,
         on_barge_in: Callable[[], None] | None = None,
         barge_in_enabled: bool = True,
+        silence_duration_ms: int = 2200,
     ) -> None:
         self.sample_rate = sample_rate
         self.channels = channels
@@ -446,11 +447,12 @@ class AudioInputStream:
         self._hp_zi = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
         self._prev_wake_sample: float = 0.0
 
-        # Adaptive noise blocker, pre-roll (640ms = 8 frames), and speech hangover (1.92s = 24 frames)
+        # Adaptive noise blocker, pre-roll (640ms = 8 frames), and speech hangover matched to silence_duration_ms
         self._noise_rms: float = 95.0
         self._rms_history: collections.deque[float] = collections.deque(maxlen=40)
         self._env_gain: float = 1.0
         self._wake_env_rms: float = 250.0
+        self._hangover_frames: int = self._compute_hangover_frames(silence_duration_ms)
         self._hangover: int = 0
         self._wake_hangover: int = 0
         self._peak_streak: int = 0
@@ -467,6 +469,15 @@ class AudioInputStream:
         self._queue: asyncio.Queue[np.ndarray] | None = None
         self._wake_queue: collections.deque[tuple[np.ndarray, bool]] = collections.deque(maxlen=max_queue_frames)
         self._stream: sd.InputStream | None = None
+
+    def _compute_hangover_frames(self, silence_duration_ms: int) -> int:
+        frame_ms = max(20.0, (self.blocksize / max(8000, self.sample_rate)) * 1000.0)
+        clamped_ms = max(1200, min(5500, int(silence_duration_ms)))
+        return max(18, int(round(clamped_ms / frame_ms)))
+
+    def set_silence_duration_ms(self, silence_duration_ms: int) -> None:
+        """Update local speech-pause hangover to match the configured End-of-Speech Pause."""
+        self._hangover_frames = self._compute_hangover_frames(silence_duration_ms)
 
     @staticmethod
     def _resolve_device(device: int | str | None) -> int | None:
@@ -580,8 +591,9 @@ class AudioInputStream:
         w_rms = float(np.sqrt(np.mean(wake16**2)))
         w_pk = float(np.max(np.abs(wake16)))
 
-        # Adapt noise floor via rolling 20th-percentile (never locks on sustained room noise)
-        if not barge_in_now:
+        # Adapt noise floor ONLY during genuine idle silence so long continuous speech never
+        # inflates _noise_rms and cuts off softer syllables mid-monologue.
+        if not barge_in_now and self._hangover == 0:
             self._rms_history.append(f_rms)
             if len(self._rms_history) == 6:
                 vals = list(self._rms_history)
@@ -592,11 +604,9 @@ class AudioInputStream:
                 floor_p20 = float(np.percentile(self._rms_history, 20))
                 if floor_p20 < self._noise_rms:
                     self._noise_rms = float(np.clip(0.75 * self._noise_rms + 0.25 * floor_p20, 20.0, 1200.0))
-                elif floor_p20 > self._noise_rms and (
-                    self._hangover == 0 or floor_p20 < self._noise_rms * 6.0
-                ):
-                    self._noise_rms = float(np.clip(0.82 * self._noise_rms + 0.18 * floor_p20, 20.0, 1200.0))
-            elif self._hangover == 0 and f_rms < self._noise_rms * 1.25:
+                elif floor_p20 > self._noise_rms:
+                    self._noise_rms = float(np.clip(0.85 * self._noise_rms + 0.15 * floor_p20, 20.0, 1200.0))
+            elif f_rms < self._noise_rms * 1.25:
                 self._noise_rms = float(np.clip(0.85 * self._noise_rms + 0.15 * f_rms, 20.0, 1200.0))
 
         # Branch 1 (Gemini Live): Near-field clear speech gate rejects distant background chatter
@@ -613,7 +623,7 @@ class AudioInputStream:
 
         is_voice = is_clear_foreground or (self._peak_streak >= 2)
         if is_voice:
-            self._hangover = 24  # 1.92s hangover preserves full phrases and mid-sentence pauses
+            self._hangover = self._hangover_frames  # Match configured End-of-Speech Pause without chopping pauses
             target_gain = float(np.clip(9500.0 / max(90.0, f_pk), 1.2, 6.0))
             self._env_gain = 0.45 * self._env_gain + 0.55 * target_gain
             excess = max(0.0, f_rms - self._noise_rms * 1.65)

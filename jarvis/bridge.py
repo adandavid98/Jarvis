@@ -418,6 +418,7 @@ class JarvisBridge:
             playback_ref=audio_out.playback_ref,
             on_barge_in=_handle_barge_in,
             barge_in_enabled=self.config.barge_in_enabled,
+            silence_duration_ms=self.config.silence_duration_ms,
         )
         try:
             mic_queue = audio_in.start(loop)
