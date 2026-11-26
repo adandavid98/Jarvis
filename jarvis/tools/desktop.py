@@ -7,6 +7,7 @@ import html
 import os
 import platform
 import re
+import shutil
 import subprocess
 import urllib.parse
 import webbrowser
@@ -42,6 +43,7 @@ _WINDOWS_APP_ALIASES: dict[str, list[str]] = {
     "vscode": ["code"],
     "code": ["code"],
     "chrome": ["chrome"],
+    "google chrome": ["chrome"],
     "edge": ["msedge"],
     "msedge": ["msedge"],
     "task manager": ["taskmgr.exe"],
@@ -49,6 +51,43 @@ _WINDOWS_APP_ALIASES: dict[str, list[str]] = {
 }
 
 _MAX_OUTPUT_CHARS = 6000
+
+
+def _find_chrome_executable() -> str | None:
+    """Locate Google Chrome executable on Windows even when not on PATH."""
+    found = shutil.which("chrome") or shutil.which("chrome.exe")
+    if found:
+        return found
+    for env_var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(env_var)
+        if not base:
+            continue
+        candidate = Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _open_url_external(url: str, browser: str = "default") -> str:
+    """Open `url` in Google Chrome or the OS default browser."""
+    pref = browser.strip().lower()
+    if pref in {"chrome", "google chrome"}:
+        chrome_exe = _find_chrome_executable()
+        if chrome_exe:
+            subprocess.Popen([chrome_exe, url], shell=False)
+            return "chrome"
+        if os.name == "nt":
+            try:
+                subprocess.Popen(["cmd", "/c", "start", "", "chrome", url], shell=False)
+                return "chrome"
+            except Exception:
+                pass
+    webbrowser.open(url)
+    return "default_browser"
+
+
+def _is_external_browser_requested(browser: str) -> bool:
+    return browser.strip().lower() in {"chrome", "google chrome", "external", "default"}
 
 
 def _truncate(text: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
@@ -88,14 +127,25 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             "workspace_dir": str(config.workspace_dir),
         }
 
-    def open_application_or_url(target: str) -> dict[str, Any]:
+    def open_application_or_url(target: str, browser: str = "viewer") -> dict[str, Any]:
         cleaned = target.strip()
         if not cleaned:
             return {"status": "error", "error": "Target cannot be empty."}
 
         if cleaned.lower().startswith(("http://", "https://")):
-            if os.environ.get("JARVIS_EMBEDDED_VIEWER") != "1":
-                webbrowser.open(cleaned)
+            force_external = _is_external_browser_requested(browser)
+            if force_external or os.environ.get("JARVIS_EMBEDDED_VIEWER") != "1":
+                opened_in = _open_url_external(cleaned, browser=browser)
+                res: dict[str, Any] = {
+                    "status": "ok",
+                    "opened": cleaned,
+                    "kind": "url",
+                    "opened_in": opened_in,
+                    "title": cleaned,
+                }
+                if not force_external:
+                    res["viewer_url"] = cleaned
+                return res
             return {
                 "status": "ok",
                 "opened": cleaned,
@@ -106,6 +156,11 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
 
         alias_cmd = _WINDOWS_APP_ALIASES.get(cleaned.lower())
         if alias_cmd:
+            if cleaned.lower() in {"chrome", "google chrome"}:
+                chrome_exe = _find_chrome_executable()
+                if chrome_exe:
+                    subprocess.Popen([chrome_exe], shell=False)
+                    return {"status": "ok", "opened": cleaned, "command": [chrome_exe]}
             if alias_cmd[0].endswith(":"):
                 os.startfile(alias_cmd[0])  # type: ignore[attr-defined]
             else:
@@ -408,26 +463,37 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
         except Exception:
             return []
 
-    async def web_search(query: str) -> dict[str, Any]:
+    async def web_search(query: str, browser: str = "viewer") -> dict[str, Any]:
         cleaned = query.strip()
         if not cleaned:
             return {"status": "error", "error": "Search query cannot be empty."}
-        search_url = f"https://duckduckgo.com/?q={urllib.parse.quote_plus(cleaned)}"
-        if os.environ.get("JARVIS_EMBEDDED_VIEWER") != "1":
-            webbrowser.open(search_url)
+        force_external = _is_external_browser_requested(browser)
+        pref = browser.strip().lower()
+        encoded = urllib.parse.quote_plus(cleaned)
+        search_url = (
+            f"https://www.google.com/search?q={encoded}"
+            if pref in {"chrome", "google chrome"}
+            else f"https://duckduckgo.com/?q={encoded}"
+        )
+        opened_in = "embedded_viewer"
+        if force_external or os.environ.get("JARVIS_EMBEDDED_VIEWER") != "1":
+            opened_in = _open_url_external(search_url, browser=browser)
         weather_snippets = await _fetch_live_weather_snippet(cleaned)
         snippets = weather_snippets if weather_snippets else await _fetch_web_snippets(cleaned, max_results=3)
         res: dict[str, Any] = {
             "status": "ok",
             "query": cleaned,
             "kind": "web_search",
-            "viewer_url": search_url,
+            "url": search_url,
+            "opened_in": opened_in,
             "title": f"Search: {cleaned}",
             "snippets": snippets,
         }
+        if not force_external:
+            res["viewer_url"] = search_url
         if not snippets:
             res["hint"] = (
-                "Search provider returned no live snippets; viewer is already open for the user. "
+                f"Search opened in {opened_in}. "
                 "Do NOT repeat web_search in a loop — answer concisely or inform the user."
             )
         return res
@@ -560,14 +626,19 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
     registry.register(
         ToolSpec(
             name="open_application_or_url",
-            description="Open a Windows application (e.g. notepad, calculator, vscode, chrome, terminal), file, or HTTPS URL.",
+            description="Open a Windows application (e.g. notepad, calculator, vscode, chrome, terminal), file, or HTTPS URL (in Jarvis's embedded viewer by default, or in Google Chrome/external browser when requested).",
             parameters={
                 "type": "OBJECT",
                 "properties": {
                     "target": {
                         "type": "STRING",
                         "description": "App name, executable, local path, or https:// URL.",
-                    }
+                    },
+                    "browser": {
+                        "type": "STRING",
+                        "enum": ["viewer", "chrome", "external"],
+                        "description": "Where to open HTTPS URLs: 'viewer' (default HUD panel), 'chrome' (Google Chrome), or 'external' (OS default browser).",
+                    },
                 },
                 "required": ["target"],
             },
@@ -577,14 +648,19 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
     registry.register(
         ToolSpec(
             name="web_search",
-            description="Search the web for a query, returning up to 3 concise text snippets and opening live results in Jarvis's viewer.",
+            description="Search the web for a query, returning up to 3 concise text snippets and opening live results in Jarvis's viewer or Google Chrome/external browser.",
             parameters={
                 "type": "OBJECT",
                 "properties": {
                     "query": {
                         "type": "STRING",
                         "description": "Search query to look up on the web.",
-                    }
+                    },
+                    "browser": {
+                        "type": "STRING",
+                        "enum": ["viewer", "chrome", "external"],
+                        "description": "Where to open results: 'viewer' (default HUD panel), 'chrome' (Google Chrome), or 'external' (OS default browser).",
+                    },
                 },
                 "required": ["query"],
             },

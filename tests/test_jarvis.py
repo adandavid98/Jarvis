@@ -257,6 +257,28 @@ def test_web_search_and_embedded_viewer_url(tmp_config: JarvisConfig, monkeypatc
         assert open_res["status"] == "ok"
         assert open_res["viewer_url"] == "https://github.com/adandavid98/Jarvis"
 
+        opened_urls: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            "jarvis.tools.desktop._open_url_external",
+            lambda url, browser="default": opened_urls.append((url, browser)) or "chrome",
+        )
+        chrome_search = await registry.execute(
+            "web_search",
+            {"query": "fastapi docs", "browser": "chrome"},
+        )
+        assert chrome_search["status"] == "ok"
+        assert "viewer_url" not in chrome_search
+        assert chrome_search["opened_in"] == "chrome"
+        assert any("google.com/search?q=fastapi+docs" in u and b == "chrome" for u, b in opened_urls)
+
+        chrome_url = await registry.execute(
+            "open_application_or_url",
+            {"target": "https://example.com", "browser": "chrome"},
+        )
+        assert chrome_url["status"] == "ok"
+        assert "viewer_url" not in chrome_url
+        assert chrome_url["opened_in"] == "chrome"
+
         standby_res = await registry.execute("enter_standby", {})
         assert standby_res["status"] == "ok"
         assert standby_res["standby"] is True
