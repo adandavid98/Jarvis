@@ -1226,9 +1226,21 @@ def test_coding_agent_executes_tools_and_respects_step_cap(tmp_path: Path, monke
     res = asyncio.run(reg.execute("run_coding_agent", {"task": "Create app.py", "max_steps": 4}))
     assert res["status"] == "ok"
     assert res["steps"] == 2
+    assert res["model"] == "gemini-2.5-flash"
     assert any(p.endswith("app.py") for p in res["files_changed"])
     assert (tmp_path / "app.py").read_text(encoding="utf-8") == "print('ok')\n"
     assert "Created app.py cleanly." in res["summary"]
+
+    # Verify deep routing, git_inspect inclusion, and oversized payload trimming
+    from jarvis.tools.coding_agent import _AGENT_ALLOWED_TOOLS, _compact_tool_response, _select_models
+
+    assert "git_inspect" in _AGENT_ALLOWED_TOOLS
+    assert _select_models("Refactor auth module and fix failing pytest", "auto")[0] == "gemini-2.5-pro"
+    assert _select_models("Small rename", "fast")[0] == "gemini-2.5-flash"
+    trimmed = _compact_tool_response({"output": "X" * 9000, "status": "ok"})
+    assert trimmed["status"] == "ok"
+    assert len(trimmed["output"]) < 7000
+    assert "truncated" in trimmed["output"]
 
 
 def test_audio_output_stream_live_level_percent() -> None:
