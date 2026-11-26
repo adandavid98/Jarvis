@@ -15,6 +15,12 @@
     <header class="titlebar">
       <div class="titlebar-brand">
         <span class="pulse-dot" id="conn-dot"></span>
+        <svg class="brand-crest" width="20" height="20" viewBox="0 0 128 128" aria-hidden="true">
+          <polygon points="64,6 114,35 114,93 64,122 14,93 14,35" fill="#04101a" stroke="#2eeeff" stroke-width="7"/>
+          <path d="M74 30 L84 30 L84 74 C84 89 73 98 58 98 C46 98 38 91 36 81 L48 77 C49 83 53 87 59 87 C67 87 74 82 74 72 Z" fill="#2eeeff"/>
+          <polygon points="43,41 62,41 56,56 38,56" fill="#ffb020"/>
+          <circle cx="62" cy="65" r="5" fill="#e9fbff"/>
+        </svg>
         <div class="brand-titles">
           <span class="brand-main">J.A.R.V.I.S.</span>
           <span class="brand-sub">MARK VIII // OBSIDIAN CORE</span>
@@ -76,6 +82,18 @@
                 </div>
               </div>
               <div class="bar"><div class="bar-fill" id="ram-bar"></div></div>
+            </div>
+          </div>
+
+          <div class="jarvis-cpu-card">
+            <div class="jarvis-cpu-top">
+              <span class="jarvis-cpu-title">JARVIS CPU</span>
+              <span class="jarvis-cpu-val" id="jarvis-cpu-val">--%</span>
+            </div>
+            <div class="bar"><div class="bar-fill jarvis-cpu-fill" id="jarvis-cpu-bar"></div></div>
+            <div class="jarvis-cpu-sub">
+              <span>Bridge <strong id="jarvis-bridge-cpu">--%</strong> · UI <strong id="jarvis-ui-cpu">--%</strong></span>
+              <span id="jarvis-proc-cnt">-- procs</span>
             </div>
           </div>
 

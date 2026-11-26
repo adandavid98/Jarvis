@@ -795,6 +795,22 @@ function connectBridge() {
       document.getElementById('ram-val').textContent = `${data.memory_percent}%`;
       document.getElementById('ram-bar').style.width = `${Math.min(100, data.memory_percent)}%`;
       setRadialGauge(ramArc, data.memory_percent);
+      if (data.jarvis_cpu_percent !== undefined) {
+        const jCpu = Number(data.jarvis_cpu_percent || 0);
+        const jValEl = document.getElementById('jarvis-cpu-val');
+        const jBarEl = document.getElementById('jarvis-cpu-bar');
+        const jBridgeEl = document.getElementById('jarvis-bridge-cpu');
+        const jUiEl = document.getElementById('jarvis-ui-cpu');
+        const jProcEl = document.getElementById('jarvis-proc-cnt');
+        if (jValEl) jValEl.textContent = `${jCpu.toFixed(1)}%`;
+        if (jBarEl) {
+          jBarEl.style.width = `${Math.min(100, jCpu * 2.5)}%`;
+          jBarEl.classList.toggle('warn', jCpu >= 15);
+        }
+        if (jBridgeEl) jBridgeEl.textContent = `${Number(data.jarvis_bridge_cpu || 0).toFixed(1)}%`;
+        if (jUiEl) jUiEl.textContent = `${Number(data.jarvis_ui_cpu || 0).toFixed(1)}%`;
+        if (jProcEl) jProcEl.textContent = `${Number(data.jarvis_process_count || 1)} procs`;
+      }
       document.getElementById('disk-val').textContent = `${data.disk_free_gb} GB`;
       document.getElementById('bat-val').textContent = data.battery
         ? `${data.battery.percent}%${data.battery.plugged_in ? ' ⚡' : ''}`

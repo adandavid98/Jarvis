@@ -793,6 +793,10 @@ def test_bridge_rotating_logger_and_restart_voice(tmp_path: Path) -> None:
         workspace_dir=tmp_path,
     )
     bridge = JarvisBridge(config=cfg)
+    tel = bridge.build_telemetry()
+    assert "jarvis_cpu_percent" in tel and 0.0 <= tel["jarvis_cpu_percent"] <= 100.0
+    assert "jarvis_bridge_cpu" in tel and "jarvis_ui_cpu" in tel
+    assert tel["jarvis_process_count"] >= 1
     bridge._voice_mode = "direct"
 
     started_modes: list[str] = []

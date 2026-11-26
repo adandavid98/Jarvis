@@ -98,7 +98,7 @@
         : isStopped
           ? 180
           : isStandby
-            ? 80
+            ? 160
             : 64;
       if (lastRenderTs && (ts - lastRenderTs) < minFrameMs) {
         scheduleNext();

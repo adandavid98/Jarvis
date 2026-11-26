@@ -331,6 +331,64 @@ html, body {
   color: rgba(56, 217, 255, 0.78);
 }
 
+.brand-crest {
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 6px rgba(0, 238, 255, 0.35));
+}
+
+.jarvis-cpu-card {
+  background: rgba(5, 18, 30, 0.82);
+  border: 1px solid rgba(255, 176, 32, 0.32);
+  border-radius: 4px;
+  padding: 7px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.jarvis-cpu-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+}
+
+.jarvis-cpu-title {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--amber);
+}
+
+.jarvis-cpu-val {
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+}
+
+.jarvis-cpu-fill {
+  background: linear-gradient(90deg, var(--cyan), #4ff5ff);
+}
+
+.jarvis-cpu-fill.warn {
+  background: linear-gradient(90deg, var(--amber), #ff6b35);
+}
+
+.jarvis-cpu-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: rgba(210, 240, 255, 0.68);
+}
+
+.jarvis-cpu-sub strong {
+  color: var(--cyan);
+  font-weight: 600;
+}
+
 .bar {
   width: 100%;
   height: 3px;

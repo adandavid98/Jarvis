@@ -95,6 +95,7 @@ class JarvisBridge:
         self._audio_out: AudioOutputStream | None = None
         self._default_endpoints: tuple[str, str] = ("", "")
         self._voice_mode: str = "wakeword"
+        self._tracked_procs: dict[int, psutil.Process] = {}
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
         if not self._clients:
@@ -307,15 +308,79 @@ class JarvisBridge:
             "recent_tasks": self.memory.recent_task_runs(limit=10),
         }
 
+    def _sample_jarvis_cpu(self) -> tuple[float, float, float, int]:
+        """Measure non-blocking CPU% for Jarvis (bridge + Electron UI tree) normalized like Task Manager."""
+        try:
+            self_pid = os.getpid()
+            self_proc = self._tracked_procs.get(self_pid) or psutil.Process(self_pid)
+            self._tracked_procs[self_pid] = self_proc
+
+            bridge_pids: set[int] = {self_pid}
+            try:
+                for ch in self_proc.children(recursive=True):
+                    bridge_pids.add(ch.pid)
+                    self._tracked_procs.setdefault(ch.pid, ch)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+            all_pids: set[int] = set(bridge_pids)
+            try:
+                parent = self_proc.parent()
+                if parent is not None:
+                    pname = (parent.name() or "").lower()
+                    if "jarvis" in pname or "electron" in pname:
+                        all_pids.add(parent.pid)
+                        self._tracked_procs.setdefault(parent.pid, parent)
+                        for ch in parent.children(recursive=True):
+                            all_pids.add(ch.pid)
+                            self._tracked_procs.setdefault(ch.pid, ch)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+            # Prune exited processes
+            for pid in list(self._tracked_procs):
+                if pid not in all_pids:
+                    self._tracked_procs.pop(pid, None)
+
+            cores = max(1, psutil.cpu_count(logical=True) or 1)
+            bridge_raw = 0.0
+            ui_raw = 0.0
+            alive = 0
+            for pid in all_pids:
+                proc = self._tracked_procs.get(pid)
+                if proc is None:
+                    continue
+                try:
+                    pct = float(proc.cpu_percent(interval=None))
+                    alive += 1
+                    if pid in bridge_pids:
+                        bridge_raw += pct
+                    else:
+                        ui_raw += pct
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    self._tracked_procs.pop(pid, None)
+
+            bridge_pct = round(min(100.0, bridge_raw / cores), 1)
+            ui_pct = round(min(100.0, ui_raw / cores), 1)
+            total_pct = round(min(100.0, bridge_pct + ui_pct), 1)
+            return total_pct, bridge_pct, ui_pct, max(1, alive)
+        except Exception:
+            return 0.0, 0.0, 0.0, 1
+
     def build_telemetry(self) -> dict[str, Any]:
-        """Collect lightweight Windows system telemetry for the HUD."""
+        """Collect lightweight Windows system telemetry plus Jarvis's own CPU load for the HUD."""
         vm = psutil.virtual_memory()
         disk = psutil.disk_usage(str(self.config.workspace_dir))
         battery = psutil.sensors_battery()
+        jarvis_cpu, bridge_cpu, ui_cpu, proc_count = self._sample_jarvis_cpu()
         return {
             "type": "telemetry",
             "cpu_percent": psutil.cpu_percent(interval=None),
             "memory_percent": vm.percent,
+            "jarvis_cpu_percent": jarvis_cpu,
+            "jarvis_bridge_cpu": bridge_cpu,
+            "jarvis_ui_cpu": ui_cpu,
+            "jarvis_process_count": proc_count,
             "disk_free_gb": round(disk.free / (1024**3), 1),
             "battery": (
                 {
