@@ -9,6 +9,7 @@ import platform
 import re
 import shutil
 import subprocess
+import time
 import urllib.parse
 import webbrowser
 from datetime import datetime
@@ -68,10 +69,138 @@ def _find_chrome_executable() -> str | None:
     return None
 
 
-def _open_url_external(url: str, browser: str = "default") -> str:
-    """Open `url` in Google Chrome or the OS default browser."""
+def _win_get_clipboard_text() -> str | None:
+    """Read current Unicode text from the Windows clipboard without spawning PowerShell."""
+    if os.name != "nt":
+        return None
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    if not user32.OpenClipboard(0):
+        return None
+    try:
+        handle = user32.GetClipboardData(13)  # CF_UNICODETEXT
+        if not handle:
+            return None
+        ptr = kernel32.GlobalLock(handle)
+        if not ptr:
+            return None
+        try:
+            return ctypes.wstring_at(ptr)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+def _win_set_clipboard_text(text: str) -> bool:
+    """Write Unicode text to the Windows clipboard."""
+    if os.name != "nt":
+        return False
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+
+    data = (text + "\x00").encode("utf-16-le")
+    if not user32.OpenClipboard(0):
+        return False
+    try:
+        user32.EmptyClipboard()
+        hmem = kernel32.GlobalAlloc(0x0002, len(data))  # GMEM_MOVEABLE
+        if not hmem:
+            return False
+        ptr = kernel32.GlobalLock(hmem)
+        if not ptr:
+            return False
+        try:
+            ctypes.memmove(ptr, data, len(data))
+        finally:
+            kernel32.GlobalUnlock(hmem)
+        return bool(user32.SetClipboardData(13, hmem))
+    finally:
+        user32.CloseClipboard()
+
+
+def _find_visible_chrome_hwnd() -> int | None:
+    """Return the top-most visible Google Chrome window handle on Windows, if any."""
+    if os.name != "nt":
+        return None
+    user32 = ctypes.windll.user32
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def _enum_cb(hwnd: int, _lparam: int) -> bool:
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        title = buf.value.lower()
+        if title == "google chrome" or " - google chrome" in title:
+            found.append(int(hwnd))
+            return False
+        return True
+
+    user32.EnumWindows(_enum_cb, 0)
+    return found[0] if found else None
+
+
+def _send_win_key_combo(*vk_codes: int) -> None:
+    user32 = ctypes.windll.user32
+    keyeventf_keyup = 0x0002
+    for vk in vk_codes:
+        user32.keybd_event(vk, 0, 0, 0)
+    for vk in reversed(vk_codes):
+        user32.keybd_event(vk, 0, keyeventf_keyup, 0)
+
+
+def _navigate_chrome_same_tab(url: str) -> bool:
+    """Focus the active Google Chrome window and navigate its current tab via Ctrl+L / Ctrl+V / Enter."""
+    if os.name != "nt":
+        return False
+    hwnd = _find_visible_chrome_hwnd()
+    if not hwnd:
+        return False
+    prev_clip = _win_get_clipboard_text()
+    if not _win_set_clipboard_text(url):
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.08)
+        _send_win_key_combo(0x11, 0x4C)  # Ctrl+L
+        time.sleep(0.05)
+        _send_win_key_combo(0x11, 0x56)  # Ctrl+V
+        time.sleep(0.04)
+        _send_win_key_combo(0x0D)  # Enter
+        time.sleep(0.08)
+        return True
+    except Exception:
+        return False
+    finally:
+        if prev_clip is not None:
+            _win_set_clipboard_text(prev_clip)
+
+
+def _open_url_external(url: str, browser: str = "default", *, same_tab: bool = False) -> str:
+    """Open `url` in Google Chrome (optionally reusing its active tab) or the OS default browser."""
     pref = browser.strip().lower()
     if pref in {"chrome", "google chrome"}:
+        if same_tab and _navigate_chrome_same_tab(url):
+            return "chrome_same_tab"
         chrome_exe = _find_chrome_executable()
         if chrome_exe:
             subprocess.Popen([chrome_exe, url], shell=False)
@@ -127,7 +256,11 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
             "workspace_dir": str(config.workspace_dir),
         }
 
-    def open_application_or_url(target: str, browser: str = "viewer") -> dict[str, Any]:
+    def open_application_or_url(
+        target: str,
+        browser: str = "viewer",
+        same_tab: bool = False,
+    ) -> dict[str, Any]:
         cleaned = target.strip()
         if not cleaned:
             return {"status": "error", "error": "Target cannot be empty."}
@@ -135,7 +268,7 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
         if cleaned.lower().startswith(("http://", "https://")):
             force_external = _is_external_browser_requested(browser)
             if force_external or os.environ.get("JARVIS_EMBEDDED_VIEWER") != "1":
-                opened_in = _open_url_external(cleaned, browser=browser)
+                opened_in = _open_url_external(cleaned, browser=browser, same_tab=bool(same_tab))
                 res: dict[str, Any] = {
                     "status": "ok",
                     "opened": cleaned,
@@ -150,6 +283,7 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
                 "status": "ok",
                 "opened": cleaned,
                 "kind": "url",
+                "opened_in": "embedded_viewer",
                 "viewer_url": cleaned,
                 "title": cleaned,
             }
@@ -463,7 +597,11 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
         except Exception:
             return []
 
-    async def web_search(query: str, browser: str = "viewer") -> dict[str, Any]:
+    async def web_search(
+        query: str,
+        browser: str = "viewer",
+        same_tab: bool = False,
+    ) -> dict[str, Any]:
         cleaned = query.strip()
         if not cleaned:
             return {"status": "error", "error": "Search query cannot be empty."}
@@ -477,7 +615,7 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
         )
         opened_in = "embedded_viewer"
         if force_external or os.environ.get("JARVIS_EMBEDDED_VIEWER") != "1":
-            opened_in = _open_url_external(search_url, browser=browser)
+            opened_in = _open_url_external(search_url, browser=browser, same_tab=bool(same_tab))
         weather_snippets = await _fetch_live_weather_snippet(cleaned)
         snippets = weather_snippets if weather_snippets else await _fetch_web_snippets(cleaned, max_results=3)
         res: dict[str, Any] = {
@@ -637,7 +775,11 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
                     "browser": {
                         "type": "STRING",
                         "enum": ["viewer", "chrome", "external"],
-                        "description": "Where to open HTTPS URLs: 'viewer' (default HUD panel), 'chrome' (Google Chrome), or 'external' (OS default browser).",
+                        "description": "Where to open HTTPS URLs: 'viewer' (Jarvis's built-in HUD browser, default), 'chrome' (Google Chrome), or 'external' (OS default browser).",
+                    },
+                    "same_tab": {
+                        "type": "BOOLEAN",
+                        "description": "When browser='chrome', set true to reuse the active Chrome tab instead of opening a new tab (e.g. 'en esta misma pestaña' / 'same tab').",
                     },
                 },
                 "required": ["target"],
@@ -648,7 +790,7 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
     registry.register(
         ToolSpec(
             name="web_search",
-            description="Search the web for a query, returning up to 3 concise text snippets and opening live results in Jarvis's viewer or Google Chrome/external browser.",
+            description="Search the web for a query, returning up to 3 concise text snippets and opening live results in Jarvis's built-in viewer or Google Chrome/external browser.",
             parameters={
                 "type": "OBJECT",
                 "properties": {
@@ -659,7 +801,11 @@ def register_desktop_tools(registry: ToolRegistry, config: JarvisConfig) -> None
                     "browser": {
                         "type": "STRING",
                         "enum": ["viewer", "chrome", "external"],
-                        "description": "Where to open results: 'viewer' (default HUD panel), 'chrome' (Google Chrome), or 'external' (OS default browser).",
+                        "description": "Where to open results: 'viewer' (Jarvis's built-in HUD browser, default), 'chrome' (Google Chrome), or 'external' (OS default browser).",
+                    },
+                    "same_tab": {
+                        "type": "BOOLEAN",
+                        "description": "When browser='chrome', set true to search inside the active Chrome tab instead of opening a new tab.",
                     },
                 },
                 "required": ["query"],

@@ -257,10 +257,11 @@ def test_web_search_and_embedded_viewer_url(tmp_config: JarvisConfig, monkeypatc
         assert open_res["status"] == "ok"
         assert open_res["viewer_url"] == "https://github.com/adandavid98/Jarvis"
 
-        opened_urls: list[tuple[str, str]] = []
+        opened_urls: list[tuple[str, str, bool]] = []
         monkeypatch.setattr(
             "jarvis.tools.desktop._open_url_external",
-            lambda url, browser="default": opened_urls.append((url, browser)) or "chrome",
+            lambda url, browser="default", same_tab=False: opened_urls.append((url, browser, same_tab))
+            or ("chrome_same_tab" if same_tab else "chrome"),
         )
         chrome_search = await registry.execute(
             "web_search",
@@ -269,15 +270,49 @@ def test_web_search_and_embedded_viewer_url(tmp_config: JarvisConfig, monkeypatc
         assert chrome_search["status"] == "ok"
         assert "viewer_url" not in chrome_search
         assert chrome_search["opened_in"] == "chrome"
-        assert any("google.com/search?q=fastapi+docs" in u and b == "chrome" for u, b in opened_urls)
+        assert any("google.com/search?q=fastapi+docs" in u and b == "chrome" and st is False for u, b, st in opened_urls)
+
+        chrome_same = await registry.execute(
+            "web_search",
+            {"query": "pydantic v2", "browser": "chrome", "same_tab": True},
+        )
+        assert chrome_same["status"] == "ok"
+        assert chrome_same["opened_in"] == "chrome_same_tab"
+        assert any("pydantic+v2" in u and st is True for u, _, st in opened_urls)
 
         chrome_url = await registry.execute(
             "open_application_or_url",
-            {"target": "https://example.com", "browser": "chrome"},
+            {"target": "https://example.com", "browser": "chrome", "same_tab": True},
         )
         assert chrome_url["status"] == "ok"
         assert "viewer_url" not in chrome_url
-        assert chrome_url["opened_in"] == "chrome"
+        assert chrome_url["opened_in"] == "chrome_same_tab"
+
+        # Verify deterministic browser intent override in JarvisLiveSession
+        from types import SimpleNamespace
+        from jarvis.live_session import JarvisLiveSession
+
+        sess_mgr = JarvisLiveSession(tmp_config, memory, registry)
+        sent_responses: list[object] = []
+
+        class _DummySess:
+            async def send_tool_response(self, *, function_responses):
+                sent_responses.extend(function_responses)
+
+        sess_mgr._record_user_utterance("Ahora búscalo en el navegador integrado dentro de Jarvis")
+        await sess_mgr._execute_and_respond(
+            _DummySess(),
+            SimpleNamespace(id="b1", name="web_search", args={"query": "python asyncio", "browser": "chrome"}),
+        )
+        assert "viewer_url" in sent_responses[-1].response
+        assert sent_responses[-1].response["opened_in"] == "embedded_viewer"
+
+        sess_mgr._record_user_utterance("Busca en Chrome en esta misma pestaña")
+        await sess_mgr._execute_and_respond(
+            _DummySess(),
+            SimpleNamespace(id="b2", name="web_search", args={"query": "uvicorn"}),
+        )
+        assert sent_responses[-1].response["opened_in"] == "chrome_same_tab"
 
         standby_res = await registry.execute("enter_standby", {})
         assert standby_res["status"] == "ok"

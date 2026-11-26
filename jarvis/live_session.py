@@ -25,7 +25,11 @@ Guidelines:
 - Execute requested work immediately using your tools (`create_document`, `write_file`, `edit_file`, `run_coding_agent`, `fetch_web_page`, `read_pdf`, `run_shell_command`, `search_code`, etc.).
 - For complete multi-file programming projects or complex debugging inside the active workspace, delegate to `run_coding_agent`.
 - For academic essays, APA/IEEE papers, or formatted reports in `.docx`/`.pdf`, use `create_document` with structured Markdown (`#` headings, lists, `| tables |`, `style="apa"` or `"report"`, plus author/institution/references).
-- When researching a topic online or in a local PDF, use `web_search`, `fetch_web_page`, or `read_pdf` before synthesizing or creating a document. Never call `web_search` in a loop — run at most 1-2 searches per question and answer with the gathered results (or tell the user what is shown in the viewer). If the user asks to search or open a link in Google Chrome or their external browser (e.g., "en Chrome", "en Google Chrome", "en mi navegador"), pass `browser="chrome"` (or `"external"`) to `web_search` or `open_application_or_url`.
+- When researching a topic online or in a local PDF, use `web_search`, `fetch_web_page`, or `read_pdf` before synthesizing or creating a document. Never call `web_search` in a loop — run at most 1-2 searches per question and answer with the gathered results (or tell the user what is shown in the viewer).
+- BROWSER ROUTING (`web_search` & `open_application_or_url`):
+  1) Default is ALWAYS `browser="viewer"` (Jarvis's built-in HUD browser, which reuses the same tab automatically).
+  2) If the user asks for Chrome or external browser ("en Chrome", "en Google Chrome", "en mi navegador"), pass `browser="chrome"` (and pass `same_tab=True` if they say "en la misma pestaña" / "en esta pestaña" / "same tab").
+  3) If the user asks to switch back to Jarvis's built-in browser ("en el navegador integrado", "en el browser interno", "dentro de Jarvis", "en tu visor"), ALWAYS pass `browser="viewer"` — never keep using `"chrome"` out of habit from a previous turn.
 - When asked to create a PDF, DOCX, or file, generate it directly on disk — do NOT read the entire document contents aloud.
 - Keep spoken responses crisp and brief (1-2 sentences): confirm what was created or changed and where it was saved, instead of reading long text, file paths, raw JSON, or terminal logs aloud unless asked.
 - You have asynchronous NON_BLOCKING tools for Windows desktop control, document/file management, PowerShell commands, reminders/memory, webhooks, code search, git inspection, and running tests.
@@ -46,6 +50,29 @@ _STANDBY_PHRASE_RE = re.compile(
     r"modo\s+espera|descansa|duerme|du[eé]rmete|vete\s+a\s+dormir|deja\s+de\s+escuchar|"
     r"eso\s+es\s+todo|nada\s+m[aá]s|adi[oó]s|chao|hasta\s+luego|nos\s+vemos|silencio|c[aá]llate"
     r")\b",
+    re.IGNORECASE,
+)
+
+_INTERNAL_BROWSER_RE = re.compile(
+    r"("
+    r"(?:navegador|browser|visor)\s+(?:integrado|interno|de\s+jarvis|embebido)|"
+    r"dentro\s+de\s+jarvis|en\s+tu\s+(?:navegador|browser|visor)|"
+    r"(?:built[- ]?in|integrated|internal|embedded)\s+(?:browser|viewer)|"
+    r"inside\s+jarvis"
+    r")",
+    re.IGNORECASE,
+)
+
+_CHROME_BROWSER_RE = re.compile(
+    r"\b(google\s+chrome|en\s+chrome|in\s+chrome|mi\s+chrome|my\s+chrome)\b",
+    re.IGNORECASE,
+)
+
+_SAME_TAB_RE = re.compile(
+    r"("
+    r"(?:en\s+)?(?:la\s+|esa\s+|esta\s+)?misma\s+pesta[ñn]a|"
+    r"en\s+esta\s+pesta[ñn]a|same\s+tab|current\s+tab|this\s+tab"
+    r")",
     re.IGNORECASE,
 )
 
@@ -197,6 +224,20 @@ class JarvisLiveSession:
 
     async def _execute_and_respond(self, session: Any, call: Any) -> None:
         args = dict(call.args) if call.args else {}
+        if call.name in {"web_search", "open_application_or_url"}:
+            now = _monotonic()
+            recent_items = [t for ts, t in self._recent_user_utterances[-4:] if (now - ts) <= 15.0]
+            latest_text = " ".join(recent_items)
+            if latest_text:
+                last_internal = max((m.end() for m in _INTERNAL_BROWSER_RE.finditer(latest_text)), default=-1)
+                last_chrome = max((m.end() for m in _CHROME_BROWSER_RE.finditer(latest_text)), default=-1)
+                if last_internal > last_chrome:
+                    args["browser"] = "viewer"
+                    args.pop("same_tab", None)
+                elif last_chrome > last_internal:
+                    args["browser"] = "chrome"
+                if _SAME_TAB_RE.search(recent_items[-1]):
+                    args["same_tab"] = True
         print(f"\n[tool] -> {call.name}({args})")
         await self._emit({"type": "tool", "phase": "start", "name": call.name, "args": args})
 
