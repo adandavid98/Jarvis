@@ -93,13 +93,15 @@
       const isBusy = state === 'tool_running' || state === 'thinking';
       const isStopped = state === 'stopped' || state === 'offline' || state === 'needs_key';
       const isStandby = state === 'idle_wake';
-      const minFrameMs = (isSpeaking || isListening || isBusy)
+      const minFrameMs = (isSpeaking || isListening)
         ? 32
-        : isStopped
-          ? 180
-          : isStandby
-            ? 160
-            : 64;
+        : isBusy
+          ? 72
+          : isStopped
+            ? 180
+            : isStandby
+              ? 160
+              : 64;
       if (lastRenderTs && (ts - lastRenderTs) < minFrameMs) {
         scheduleNext();
         return;

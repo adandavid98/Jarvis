@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -125,12 +126,15 @@ class JarvisMemory:
             if sync_md_path is not None
             else self.db_path.parent / "SYNC.md"
         )
+        self._sync_lock = threading.Lock()
+        self._sync_timer: threading.Timer | None = None
         self._init_schema()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000")
         try:
             yield conn
             conn.commit()
@@ -139,6 +143,8 @@ class JarvisMemory:
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS facts (
@@ -488,7 +494,14 @@ class JarvisMemory:
 
     # --- Conversation Sync ---
 
-    def log_message(self, role: str, content: str, source: str = "voice") -> ConversationTurn | None:
+    def log_message(
+        self,
+        role: str,
+        content: str,
+        source: str = "voice",
+        *,
+        defer_sync: bool = False,
+    ) -> ConversationTurn | None:
         """Persist a user or Jarvis conversation turn and refresh SYNC.md."""
         cleaned = content.strip()
         if not cleaned:
@@ -500,7 +513,7 @@ class JarvisMemory:
                 (source.strip() or "voice", role.strip(), cleaned, now),
             )
             turn_id = int(cursor.lastrowid)
-        self.export_sync_markdown()
+        self.export_sync_markdown(async_defer=defer_sync)
         return ConversationTurn(
             id=turn_id,
             source=source.strip() or "voice",
@@ -634,38 +647,57 @@ class JarvisMemory:
             sections.append("Recent conversation context:\n" + "\n".join(conv_lines))
         return "\n\n".join(sections)
 
-    def export_sync_markdown(self) -> None:
+    def _write_sync_markdown_now(self) -> None:
         """Write a human-readable memory & conversation snapshot to `data/SYNC.md`."""
-        facts = self.recall_facts(limit=30)
-        reminders = self.list_reminders(include_completed=False)
-        recent = self.recent_messages(limit=20)
+        with self._sync_lock:
+            facts = self.recall_facts(limit=30)
+            reminders = self.list_reminders(include_completed=False)
+            recent = self.recent_messages(limit=20)
 
-        lines = [
-            "# Jarvis Synced Memory",
-            "",
-            f"_Last updated: {_utc_now_iso()}_",
-            "",
-            "## Open Reminders & Outstanding Tasks",
-        ]
-        if reminders:
-            for r in reminders:
-                due = f" *(due: {r.due_at})*" if r.due_at else ""
-                lines.append(f"- [ ] **#{r.id}** {r.title}{due}")
-        else:
-            lines.append("- _None_")
+            lines = [
+                "# Jarvis Synced Memory",
+                "",
+                f"_Last updated: {_utc_now_iso()}_",
+                "",
+                "## Open Reminders & Outstanding Tasks",
+            ]
+            if reminders:
+                for r in reminders:
+                    due = f" *(due: {r.due_at})*" if r.due_at else ""
+                    lines.append(f"- [ ] **#{r.id}** {r.title}{due}")
+            else:
+                lines.append("- _None_")
 
-        lines.extend(["", "## Remembered Facts & Preferences"])
-        if facts:
-            for f in facts:
-                lines.append(f"- **{f.key}** (`{f.category}`): {f.value}")
-        else:
-            lines.append("- _None_")
+            lines.extend(["", "## Remembered Facts & Preferences"])
+            if facts:
+                for f in facts:
+                    lines.append(f"- **{f.key}** (`{f.category}`): {f.value}")
+            else:
+                lines.append("- _None_")
 
-        lines.extend(["", "## Recent Voice & Text Conversations"])
-        if recent:
-            for m in recent:
-                lines.append(f"- `{m.created_at}` **[{m.source}/{m.role}]** {m.content}")
-        else:
-            lines.append("- _None_")
+            lines.extend(["", "## Recent Voice & Text Conversations"])
+            if recent:
+                for m in recent:
+                    lines.append(f"- `{m.created_at}` **[{m.source}/{m.role}]** {m.content}")
+            else:
+                lines.append("- _None_")
 
-        self.sync_md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            self.sync_md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def export_sync_markdown(self, *, async_defer: bool = False) -> None:
+        """Export memory snapshot to `SYNC.md` (debounced on background thread when `async_defer=True`)."""
+        if not async_defer:
+            with self._sync_lock:
+                if self._sync_timer is not None:
+                    self._sync_timer.cancel()
+                    self._sync_timer = None
+            self._write_sync_markdown_now()
+            return
+
+        with self._sync_lock:
+            if self._sync_timer is not None:
+                self._sync_timer.cancel()
+            timer = threading.Timer(0.8, self._write_sync_markdown_now)
+            timer.daemon = True
+            timer.start()
+            self._sync_timer = timer

@@ -8,10 +8,21 @@ const textEl = document.getElementById('ov-text');
 const barsWrap = document.getElementById('ov-bars');
 const bars = barsWrap ? Array.from(barsWrap.querySelectorAll('span')) : [];
 
+let overlayVisible = false;
+let cachedState = 'idle_wake';
+let cachedText = 'Ready.';
+
 if (window.jarvisDesktop.onWindowVisibility) {
   window.jarvisDesktop.onWindowVisibility((visible) => {
-    if (visible) ovOrbEngine?.start();
-    else ovOrbEngine?.stop();
+    overlayVisible = Boolean(visible);
+    if (overlayVisible) {
+      stateEl.textContent = cachedState.replace('_', ' ').toUpperCase();
+      textEl.textContent = cachedText;
+      ovOrbEngine?.setState(cachedState);
+      ovOrbEngine?.start();
+    } else {
+      ovOrbEngine?.stop();
+    }
   });
 }
 
@@ -39,24 +50,33 @@ function connectOverlay() {
     const data = JSON.parse(event.data);
 
     if (data.type === 'wake') {
-      textEl.textContent = 'Listening...';
-      toolEl.classList.add('hidden');
-      ovOrbEngine?.setState('listening');
+      cachedState = 'listening';
+      cachedText = 'Listening...';
+      if (overlayVisible) {
+        textEl.textContent = cachedText;
+        toolEl.classList.add('hidden');
+        ovOrbEngine?.setState('listening');
+      }
       window.jarvisDesktop.notifyWake();
     } else if (data.type === 'state') {
-      const st = String(data.state || 'listening');
-      ovOrbEngine?.setState(st);
-      stateEl.textContent = st.replace('_', ' ').toUpperCase();
-      window.jarvisDesktop.notifyState(st);
+      cachedState = String(data.state || 'listening');
+      if (overlayVisible) {
+        ovOrbEngine?.setState(cachedState);
+        stateEl.textContent = cachedState.replace('_', ' ').toUpperCase();
+      }
+      window.jarvisDesktop.notifyState(cachedState);
     } else if (data.type === 'mic_level') {
+      if (!overlayVisible) return;
       const outLvl = Number(data.output_level || 0);
       const micLvl = Number(data.level || 0);
       updateBars(Math.max(micLvl, outLvl));
       ovOrbEngine?.setAudio({ mic: micLvl, output: outLvl });
     } else if (data.type === 'transcript') {
       const prefix = data.role === 'user' ? 'You: ' : 'Jarvis: ';
-      textEl.textContent = `${prefix}${data.text}`;
+      cachedText = `${prefix}${data.text}`;
+      if (overlayVisible) textEl.textContent = cachedText;
     } else if (data.type === 'tool') {
+      if (!overlayVisible) return;
       if (data.phase === 'start') {
         toolEl.textContent = `▶ ${data.name}`;
         toolEl.classList.remove('hidden');
@@ -65,7 +85,8 @@ function connectOverlay() {
         setTimeout(() => toolEl.classList.add('hidden'), 2000);
       }
     } else if (data.type === 'error') {
-      textEl.textContent = `Error: ${data.message}`;
+      cachedText = `Error: ${data.message}`;
+      if (overlayVisible) textEl.textContent = cachedText;
     }
   };
 }

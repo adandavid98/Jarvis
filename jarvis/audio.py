@@ -270,11 +270,13 @@ class EchoCanceller:
         self._last_lag: int | None = None
         self._h: np.ndarray | None = None
         self._coupling: float = 0.30
+        self._lag_refresh_countdown: int = 0
 
     def reset(self) -> None:
         self._last_lag = None
         self._h = None
         self._coupling = 0.30
+        self._lag_refresh_countdown = 0
 
     def process(
         self,
@@ -297,16 +299,56 @@ class EchoCanceller:
         ref_z = ref_hist.astype(np.float32) - float(np.mean(ref_hist))
         ref_tail = ref_z[-min(m, n * 6) :]
         ref_window_rms = float(np.sqrt(np.mean(ref_tail**2))) if len(ref_tail) else 0.0
+
+        offsets = (
+            self._OFFSETS
+            if self.num_taps == len(self._OFFSETS)
+            else np.arange(-(self.num_taps // 2), (self.num_taps // 2) + 1, dtype=np.int64)
+        )
+        left_pad = int(abs(offsets[0]))
+        max_s = m - n - max_offset - 2
+        min_s = max(24, max_s - self.max_lag_samples)
+        if min_s >= max_s:
+            return mic_z, mic_rms > max(1600.0, noise_rms * 4.5)
+
+        # Fast-exit when room is very quiet and we already have an active echo model
+        if (
+            self._last_lag is not None
+            and self._h is not None
+            and mic_rms < max(210.0, noise_rms * 2.4)
+            and ref_window_rms < 900.0
+        ):
+            self._lag_refresh_countdown = max(0, self._lag_refresh_countdown - 1)
+            return mic_z, False
+
+        # Reuse cached speaker->mic acoustic lag for up to 4 frames (~320ms) to avoid 16K-FFT per block
+        if self._last_lag is not None and self._h is not None and len(self._h) == len(offsets) and self._lag_refresh_countdown > 0:
+            self._lag_refresh_countdown -= 1
+            center_s = max(left_pad, min(m - n - max_offset - 1, (m - n) - self._last_lag))
+            idx_mat = np.arange(n)[:, None] + (center_s + offsets)[None, :]
+            x_mat = ref_z[idx_mat]
+            echo_hat = x_mat @ self._h
+            residual = mic_z - echo_hat
+            res_rms = float(np.sqrt(np.mean(residual**2)))
+            echo_rms = float(np.sqrt(np.mean(echo_hat**2)))
+            expected_echo_rms = ref_window_rms * self._coupling
+            suspected_dt = res_rms > max(
+                260.0,
+                noise_rms * 3.0,
+                echo_rms * 0.78,
+                expected_echo_rms * 1.25,
+            )
+            if not suspected_dt:
+                return residual.astype(np.float32), False
+            # Energy diverged (possible user barge-in or speaker movement): fall through to full FFT check
+
+        self._lag_refresh_countdown = 4
         # Fast FFT cross-correlation across [0 .. max_lag_samples] speaker-to-mic acoustic delay
         fft_len = 1 << int(np.ceil(np.log2(m + n)))
         corr_full = np.fft.irfft(
             np.fft.rfft(ref_z, n=fft_len) * np.conj(np.fft.rfft(mic_z, n=fft_len)),
             n=fft_len,
         )
-        max_s = m - n - max_offset - 2
-        min_s = max(24, max_s - self.max_lag_samples)
-        if min_s >= max_s:
-            return mic_z, mic_rms > max(1600.0, noise_rms * 4.5)
 
         cs = corr_full[min_s : max_s + 1]
         c2 = np.concatenate(([0.0], np.cumsum(ref_z.astype(np.float64) ** 2)))
@@ -320,12 +362,6 @@ class EchoCanceller:
         best_lag = (m - n) - best_s
         aligned_ref_rms = float(np.sqrt(float(ref_energies[rel_idx]) / float(n)))
 
-        offsets = (
-            self._OFFSETS
-            if self.num_taps == len(self._OFFSETS)
-            else np.arange(-(self.num_taps // 2), (self.num_taps // 2) + 1, dtype=np.int64)
-        )
-        left_pad = int(abs(offsets[0]))
         center_s = max(left_pad, min(m - n - max_offset - 1, best_s))
 
         # Track speaker->mic acoustic coupling gain from reference windows

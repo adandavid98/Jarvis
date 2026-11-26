@@ -95,6 +95,7 @@ class JarvisLiveSession:
         self._standby_event: asyncio.Event | None = None
         self._recent_user_utterances: list[tuple[float, str]] = []
         self._turn_tool_counts: dict[str, int] = {}
+        self._last_emitted_state: str | None = None
 
     def _record_user_utterance(self, text: str) -> None:
         cleaned = text.strip()
@@ -111,6 +112,11 @@ class JarvisLiveSession:
             self._standby_event.set()
 
     async def _emit(self, payload: dict[str, Any]) -> None:
+        if payload.get("type") == "state":
+            state = str(payload.get("state", ""))
+            if state == self._last_emitted_state:
+                return
+            self._last_emitted_state = state
         if self._on_event is None:
             return
         res = self._on_event(payload)
@@ -273,6 +279,7 @@ class JarvisLiveSession:
         end_reason = "closed"
         self._recent_user_utterances.clear()
         self._turn_tool_counts.clear()
+        self._last_emitted_state = None
 
         await self._emit({"type": "state", "state": "listening"})
 
@@ -300,7 +307,7 @@ class JarvisLiveSession:
             greeting_state_task: asyncio.Task[None] | None = None
             if initial_prompt:
                 self._record_user_utterance(initial_prompt)
-                self.memory.log_message("user", initial_prompt, source="desktop")
+                self.memory.log_message("user", initial_prompt, source="desktop", defer_sync=True)
                 await self._emit({"type": "transcript", "role": "user", "text": initial_prompt, "final": True})
                 await session.send_realtime_input(text=initial_prompt)
             elif use_cached_greeting:
@@ -402,7 +409,7 @@ class JarvisLiveSession:
                     turn_buffers[speaker].clear()
                     if full_text:
                         role = "user" if speaker == "You" else "jarvis"
-                        self.memory.log_message(role, full_text, source="voice")
+                        self.memory.log_message(role, full_text, source="voice", defer_sync=True)
                         await self._emit({"type": "transcript", "role": role, "text": full_text, "final": True})
                     print()
                     active_speaker = None

@@ -13,6 +13,13 @@ from jarvis.tools._paths import resolve_workspace_path
 from jarvis.tools.registry import ToolRegistry, ToolSpec
 
 _SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", ".pytest_cache", "dist", "build"}
+_BINARY_EXTS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".bmp", ".svg",
+    ".pdf", ".docx", ".xlsx", ".pptx", ".zip", ".7z", ".tar", ".gz",
+    ".exe", ".dll", ".so", ".pyd", ".pyc", ".pyo", ".bin", ".dat",
+    ".db", ".db-wal", ".db-shm", ".sqlite", ".onnx", ".tflite",
+    ".pcm", ".wav", ".mp3", ".mp4", ".avi", ".mov", ".woff", ".woff2", ".ttf",
+}
 
 
 def register_developer_tools(registry: ToolRegistry, config: JarvisConfig) -> None:
@@ -39,7 +46,7 @@ def register_developer_tools(registry: ToolRegistry, config: JarvisConfig) -> No
         for path in root.rglob("*"):
             if any(part in _SKIP_DIRS for part in path.parts):
                 continue
-            if not path.is_file() or not fnmatch.fnmatch(path.name, glob_pattern):
+            if not path.is_file() or path.suffix.lower() in _BINARY_EXTS or not fnmatch.fnmatch(path.name, glob_pattern):
                 continue
             if path.stat().st_size > 512_000:
                 continue

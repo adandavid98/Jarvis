@@ -605,20 +605,41 @@ function setState(state) {
   }
 }
 
+let pendingDraftUpdate = null;
+let draftFlushScheduled = false;
+
+function scheduleDraftFlush() {
+  if (draftFlushScheduled) return;
+  draftFlushScheduled = true;
+  requestAnimationFrame(() => {
+    draftFlushScheduled = false;
+    if (!pendingDraftUpdate) return;
+    const { el } = pendingDraftUpdate;
+    const text = pendingDraftUpdate.text;
+    pendingDraftUpdate = null;
+    const body = el.querySelector('.msg-body');
+    if (body) body.textContent = text;
+    chatFeed.scrollTop = chatFeed.scrollHeight;
+  });
+}
+
 function appendMessage(role, text, isDraft = false) {
   if (isDraft && liveDraftEl && liveDraftRole === role) {
-    liveDraftEl.querySelector('.msg-body').textContent = text;
-    chatFeed.scrollTop = chatFeed.scrollHeight;
+    pendingDraftUpdate = { el: liveDraftEl, text };
+    scheduleDraftFlush();
     return;
   }
 
   if (!isDraft && liveDraftEl && liveDraftRole === role) {
+    pendingDraftUpdate = null;
     liveDraftEl.querySelector('.msg-body').textContent = text;
     liveDraftEl = null;
     liveDraftRole = null;
     chatFeed.scrollTop = chatFeed.scrollHeight;
     return;
   }
+
+  if (!isDraft) pendingDraftUpdate = null;
 
   const div = document.createElement('div');
   div.className = `msg ${role}`;

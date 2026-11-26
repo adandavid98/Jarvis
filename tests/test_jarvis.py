@@ -1416,3 +1416,39 @@ def test_speaker_echo_does_not_self_barge_in_or_leak_preroll() -> None:
     assert len(stream._pre_roll) == 0
 
 
+def test_v137_cpu_optimizations_behavior(tmp_path: Path) -> None:
+    import numpy as np
+    from jarvis.audio import EchoCanceller, PlaybackReferenceBuffer
+    from jarvis.config import JarvisConfig
+    from jarvis.memory import JarvisMemory
+    from jarvis.tools import build_default_registry
+
+    # 1. EchoCanceller caches acoustic lag after initial FFT and still detects sudden double-talk
+    ref_buf = PlaybackReferenceBuffer(target_rate=16000, max_seconds=3.0)
+    t24 = np.linspace(0.0, 0.24, int(24000 * 0.24), endpoint=False)
+    ref_buf.push_24k((7000.0 * np.sin(2 * np.pi * 320 * t24)).astype(np.int16), source_rate=24000)
+    hist, _ = ref_buf.snapshot(max_samples=6400)
+    mic_echo = (0.4 * hist[-(1280 + 350):-350]).astype(np.int16)
+
+    aec = EchoCanceller(num_taps=25, max_lag_samples=2880)
+    _, dt1 = aec.process(mic_echo, hist, noise_rms=60.0)
+    assert dt1 is False and aec._lag_refresh_countdown == 4
+    _, dt2 = aec.process(mic_echo, hist, noise_rms=60.0)
+    assert dt2 is False and aec._lag_refresh_countdown == 3
+
+    t16 = np.linspace(0.0, 0.08, 1280, endpoint=False)
+    near = (4500.0 * np.sin(2 * np.pi * 920 * t16)).astype(np.int16)
+    _, dt_barge = aec.process(np.clip(mic_echo.astype(np.int32) + near, -32768, 32767).astype(np.int16), hist, noise_rms=60.0)
+    assert dt_barge is True
+
+    # 2. search_code skips binary files (.png) while indexing text files (.py)
+    (tmp_path / "code.py").write_text("TARGET_TOKEN = 42\n", encoding="utf-8")
+    (tmp_path / "blob.png").write_bytes(b"\x89PNG\r\n\x1a\nTARGET_TOKEN")
+    cfg = JarvisConfig(gemini_api_key="k", data_dir=tmp_path, db_path=tmp_path / "m.db", workspace_dir=tmp_path)
+    mem = JarvisMemory(cfg.db_path)
+    reg = build_default_registry(cfg, mem)
+    search_res = asyncio.run(reg.execute("search_code", {"query": "TARGET_TOKEN"}))
+    assert search_res["status"] == "ok"
+    assert [m["file"] for m in search_res["matches"]] == ["code.py"]
+
+

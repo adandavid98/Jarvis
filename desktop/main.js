@@ -188,14 +188,35 @@ function scheduleHideOverlay(delayMs = 2200) {
   }, delayMs);
 }
 
+let bridgeCtrlWs = null;
+const bridgeCtrlQueue = [];
+
 function sendBridgeCommand(payload) {
   try {
+    const raw = JSON.stringify(payload);
+    if (bridgeCtrlWs && bridgeCtrlWs.readyState === WebSocket.OPEN) {
+      bridgeCtrlWs.send(raw);
+      return;
+    }
+    bridgeCtrlQueue.push(raw);
+    if (bridgeCtrlQueue.length > 16) bridgeCtrlQueue.shift();
+
+    if (bridgeCtrlWs && bridgeCtrlWs.readyState === WebSocket.CONNECTING) {
+      return;
+    }
     const ws = new WebSocket(`ws://127.0.0.1:${BRIDGE_PORT}`);
+    bridgeCtrlWs = ws;
     ws.on('open', () => {
-      ws.send(JSON.stringify(payload));
-      ws.close();
+      while (bridgeCtrlQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
+        ws.send(bridgeCtrlQueue.shift());
+      }
     });
-    ws.on('error', () => {});
+    ws.on('close', () => {
+      if (bridgeCtrlWs === ws) bridgeCtrlWs = null;
+    });
+    ws.on('error', () => {
+      if (bridgeCtrlWs === ws) bridgeCtrlWs = null;
+    });
   } catch (_) {}
 }
 
